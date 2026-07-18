@@ -1,0 +1,57 @@
+[project]
+name = "wechat-decrypt-tool"
+version = "1.18.0"
+description = "Modern WeChat database decryption tool with React frontend"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "cryptography>=41.0.0",
+    "fastapi>=0.104.0",
+    "uvicorn[standard]>=0.24.0",
+    "python-multipart>=0.0.6",
+    "aiofiles>=23.2.1",
+    "typing-extensions>=4.8.0",
+    "pywin32>=310; sys_platform == 'win32'",
+    "psutil>=7.0.0",
+    "pycryptodome>=3.23.0",
+    "requests>=2.32.4",
+    "loguru>=0.7.0",
+    "zstandard>=0.23.0",
+    "pilk>=0.2.4",
+    "pypinyin>=0.53.0",
+    "jieba>=0.42.1",
+    "wx_key>=2.0.1",
+    "pefile>=2024.8.26; sys_platform == 'win32'",
+    "pymem>=1.14.0; sys_platform == 'win32'",
+    "yara-python>=4.5.2; sys_platform == 'win32'",
+    "packaging",
+    "httpx",
+]
+
+[project.optional-dependencies]
+build = [
+    "pyinstaller>=6.0.0",
+]
+
+[project.scripts]
+wechat-decrypt = "main:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/wechat_decrypt_tool"]
+include = [
+    "src/wechat_decrypt_tool/native/VoipEngine.dll",
+    "src/wechat_decrypt_tool/native/wcdb_api.dll",
+    "src/wechat_decrypt_tool/native/WCDB.dll",
+    "src/wechat_decrypt_tool/native/wce_integrity*.pyd",
+    "src/wechat_decrypt_tool/native/weflow_wasm/weflow_wasm_keystream.js",
+    "src/wechat_decrypt_tool/native/weflow_wasm/wasm_video_decode.js",
+    "src/wechat_decrypt_tool/native/weflow_wasm/wasm_video_decode.wasm",
+    "src/wechat_decrypt_tool/resources/*.json",
+]
+
+[tool.uv]
+find-links = ["./tools/key_wheels/"]
