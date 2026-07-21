@@ -59,20 +59,20 @@ if not msg_db:
 
 if msg_db:
     print(f"\n找到消息数据库: {msg_db}")
-    
+
     # 解密并查看结构
     temp_db = Path("temp_msg.db")
     decryptor = WeChatDatabaseDecryptor(key_hex=db_key)
     decryptor.decrypt_database(str(msg_db), str(temp_db))
-    
+
     conn = sqlite3.connect(str(temp_db))
     cursor = conn.cursor()
-    
+
     # 获取表
     cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
     tables = cursor.fetchall()
     print(f"\n表列表: {[t[0] for t in tables]}")
-    
+
     # 查看 MSG 表结构
     for table in tables:
         if 'MSG' in table[0].upper() or 'MESSAGE' in table[0].upper():
@@ -81,32 +81,32 @@ if msg_db:
             columns = cursor.fetchall()
             for col in columns:
                 print(f"  {col[1]}: {col[2]}")
-    
+
     conn.close()
     temp_db.unlink()
 else:
     print("\n未找到 MSG 数据库，查看 MicroMsg.db")
-    
+
     micro_msg = db_storage / "MicroMsg.db"
     if micro_msg.exists():
         print(f"MicroMsg.db 存在: {micro_msg}")
         temp_db = Path("temp_micro.db")
         decryptor = WeChatDatabaseDecryptor(key_hex=db_key)
         decryptor.decrypt_database(str(micro_msg), str(temp_db))
-        
+
         conn = sqlite3.connect(str(temp_db))
         cursor = conn.cursor()
-        
+
         cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
         tables = cursor.fetchall()
         print(f"\n表列表: {[t[0] for t in tables]}")
-        
+
         for table in tables:
             print(f"\n=== {table[0]} ===")
             cursor.execute(f"PRAGMA table_info({table[0]})")
             columns = cursor.fetchall()
             for col in columns[:10]:  # 只显示前10列
                 print(f"  {col[1]}: {col[2]}")
-        
+
         conn.close()
         temp_db.unlink()

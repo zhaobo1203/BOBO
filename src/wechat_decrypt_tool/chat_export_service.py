@@ -577,7 +577,6 @@ def _download_remote_image_to_zip(
     return ""
 
 
-
 # HTML export integrity/style/runtime core is provided by native/wce_integrity.pyd.
 # Keep Python as orchestration only; do not provide Python fallbacks for these pieces.
 _HTML_EXPORT_NATIVE_ERROR = "\u0048\u0054\u004d\u004c \u5bfc\u51fa\u7ec4\u4ef6\u521d\u59cb\u5316\u5931\u8d25\u3002"
@@ -5733,7 +5732,6 @@ def _write_conversation_html(
                     except Exception:
                         frag_text = ""
                 frag_text = _minify_html_for_export(frag_text)
-
 
                 num = str(page_no).zfill(int(paged_pad_width or 4))
                 arc_js = f"{conv_dir}/pages/page-{num}.js"

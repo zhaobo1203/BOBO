@@ -29,7 +29,7 @@ class ColoredFormatter(logging.Formatter):
 
     def format(self, record):
         formatted = super().format(record)
-        
+
         # 只在控制台输出时添加颜色
         if hasattr(sys.stderr, 'isatty') and sys.stderr.isatty():
             level_color = self.COLORS.get(record.levelname, self.COLORS['RESET'])
@@ -38,7 +38,7 @@ class ColoredFormatter(logging.Formatter):
                 f'[{record.levelname}]',
                 f'[{level_color}{record.levelname}{reset_color}]'
             )
-        
+
         return formatted
 
 
@@ -69,25 +69,25 @@ def get_log_file() -> Path:
 
 class ExeLoggerManager:
     """EXE日志管理器（单例）
-    
+
     日志文件命名规则: monitor_YYYY-MM-DD_HHMMSS_pid<进程ID>.log
     每次程序启动都会创建新的日志文件，避免日志混乱。
     """
-    
+
     _instance: Optional['ExeLoggerManager'] = None
     _initialized: bool = False
-    
+
     def __new__(cls):
         if cls._instance is None:
             cls._instance = super().__new__(cls)
         return cls._instance
-    
+
     def setup(self, log_level: str = 'INFO') -> Path:
         """设置日志系统
-        
+
         Args:
             log_level: 日志级别 (DEBUG, INFO, WARNING, ERROR, CRITICAL)
-        
+
         Returns:
             日志文件路径
         """
@@ -95,16 +95,16 @@ class ExeLoggerManager:
         env_level = os.environ.get('WECHAT_LOG_LEVEL', '').strip().upper()
         if env_level in ('DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'):
             log_level = env_level
-        
+
         level = getattr(logging, log_level.upper(), logging.INFO)
-        
+
         # 获取日志文件路径（每次启动创建新文件）
         log_file = get_log_file()
-        
+
         # 如果已初始化，直接返回
         if self._initialized:
             return getattr(self, '_log_file', log_file)
-        
+
         # 清除现有处理器
         root_logger = logging.getLogger()
         for handler in root_logger.handlers[:]:
@@ -113,7 +113,7 @@ class ExeLoggerManager:
                 handler.close()
             except Exception:
                 pass
-        
+
         # 日志格式
         file_format = logging.Formatter(
             '%(asctime)s [%(levelname)s] %(name)s: %(message)s',
@@ -123,25 +123,25 @@ class ExeLoggerManager:
             '%(asctime)s [%(levelname)s] %(name)s: %(message)s',
             datefmt='%H:%M:%S'
         )
-        
+
         # 文件处理器
         file_handler = logging.FileHandler(log_file, encoding='utf-8')
         file_handler.setFormatter(file_format)
         file_handler.setLevel(level)
-        
+
         # 控制台处理器（仅在调试模式启用）
         console_handler = None
         if os.environ.get('WECHAT_DEBUG') == '1':
             console_handler = logging.StreamHandler(sys.stdout)
             console_handler.setFormatter(console_format)
             console_handler.setLevel(level)
-        
+
         # 配置根日志器
         root_logger.setLevel(level)
         root_logger.addHandler(file_handler)
         if console_handler:
             root_logger.addHandler(console_handler)
-        
+
         # 记录初始化信息
         logger = logging.getLogger(__name__)
         logger.info('=' * 50)
@@ -152,14 +152,14 @@ class ExeLoggerManager:
         if getattr(sys, 'frozen', False):
             logger.info(f'EXE路径: {sys.executable}')
         logger.info('=' * 50)
-        
+
         # 保存状态
         self._log_file = log_file
         self._log_level = level
         self._initialized = True
-        
+
         return log_file
-    
+
     def get_log_file(self) -> Path:
         """获取当前日志文件路径"""
         if not self._initialized:
@@ -169,10 +169,10 @@ class ExeLoggerManager:
 
 def setup_exe_logging(log_level: str = 'INFO') -> Path:
     """设置EXE日志系统
-    
+
     Args:
         log_level: 日志级别
-    
+
     Returns:
         日志文件路径
     """
@@ -182,10 +182,10 @@ def setup_exe_logging(log_level: str = 'INFO') -> Path:
 
 def get_exe_logger(name: str) -> logging.Logger:
     """获取日志器
-    
+
     Args:
         name: 日志器名称（通常使用 __name__）
-    
+
     Returns:
         Logger实例
     """

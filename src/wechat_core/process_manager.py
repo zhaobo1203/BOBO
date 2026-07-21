@@ -17,7 +17,7 @@ from typing import List, Dict, Optional
 
 def detect_wechat_process() -> List[Dict]:
     """检测微信进程
-    
+
     Returns:
         list: 进程列表，每个元素包含 pid, name, exe
     """
@@ -38,7 +38,7 @@ def detect_wechat_process() -> List[Dict]:
 
 def kill_wechat_processes() -> int:
     """终止所有微信进程
-    
+
     Returns:
         int: 终止的进程数量
     """
@@ -51,10 +51,10 @@ def kill_wechat_processes() -> int:
                 killed_count += 1
         except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
             pass
-    
+
     # 等待进程终止
     time.sleep(2)
-    
+
     # 检查是否还有残留进程
     remaining = detect_wechat_process()
     if remaining:
@@ -66,13 +66,13 @@ def kill_wechat_processes() -> int:
                     proc.kill()
             except:
                 pass
-    
+
     return killed_count
 
 
 def detect_wechat_installation() -> Dict:
     """从注册表检测微信安装路径
-    
+
     Returns:
         dict: 包含 wechat_exe_path 的字典，失败返回空字典
     """
@@ -81,7 +81,7 @@ def detect_wechat_installation() -> Dict:
         (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Tencent\WeChat"),
         (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\WOW6432Node\Tencent\WeChat"),
     ]
-    
+
     for hkey, key_path in registry_paths:
         try:
             key = winreg.OpenKey(hkey, key_path)
@@ -92,7 +92,7 @@ def detect_wechat_installation() -> Dict:
                         wechat_exe = os.path.join(file_path, "WeChat.exe")
                         if os.path.exists(wechat_exe):
                             return {'wechat_exe_path': wechat_exe}
-                        
+
                         # 尝试 Weixin.exe (新版微信)
                         weixin_exe = os.path.join(file_path, "Weixin.exe")
                         if os.path.exists(weixin_exe):
@@ -102,22 +102,22 @@ def detect_wechat_installation() -> Dict:
             winreg.CloseKey(key)
         except Exception:
             continue
-    
+
     return {}
 
 
 def launch_wechat(wechat_exe_path: str) -> Optional[int]:
     """启动微信客户端
-    
+
     Args:
         wechat_exe_path: 微信可执行文件路径
-        
+
     Returns:
         int: 进程PID，失败返回 None
     """
     if not os.path.exists(wechat_exe_path):
         return None
-    
+
     try:
         process = subprocess.Popen(wechat_exe_path)
         return process.pid
@@ -127,10 +127,10 @@ def launch_wechat(wechat_exe_path: str) -> Optional[int]:
 
 def ensure_wechat_running(wechat_exe_path: str = None) -> Dict:
     """确保微信正在运行
-    
+
     Args:
         wechat_exe_path: 微信可执行文件路径（可选）
-        
+
     Returns:
         dict: 包含进程信息和状态
     """
@@ -142,18 +142,18 @@ def ensure_wechat_running(wechat_exe_path: str = None) -> Dict:
             'processes': processes,
             'pid': processes[0]['pid']
         }
-    
+
     # 需要启动微信
     if not wechat_exe_path:
         install_info = detect_wechat_installation()
         wechat_exe_path = install_info.get('wechat_exe_path')
-    
+
     if not wechat_exe_path:
         return {
             'status': 'not_found',
             'error': '未找到微信安装路径'
         }
-    
+
     # 启动微信
     pid = launch_wechat(wechat_exe_path)
     if pid:

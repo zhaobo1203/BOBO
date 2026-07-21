@@ -70,25 +70,25 @@ for i in range(10):
     msg_db = db_storage / "message" / f"message_{i}.db"
     if not msg_db.exists():
         continue
-    
+
     temp_msg = Path(f"temp_debug_msg_{i}.db")
     try:
         decryptor.decrypt_database(str(msg_db), str(temp_msg))
-        
+
         conn = sqlite3.connect(str(temp_msg))
         cursor = conn.cursor()
-        
+
         # 检查表是否存在
         cursor.execute(f"SELECT name FROM sqlite_master WHERE type='table' AND name='{table_name}'")
         if cursor.fetchone():
             print(f"Found in message_{i}.db")
-            
+
             # 查看消息表结构
             cursor.execute(f"PRAGMA table_info({table_name})")
             print("\nTable columns:")
             for col in cursor.fetchall():
                 print(f"  {col[1]} ({col[2]})")
-            
+
             # 查看最近消息的发送者信息
             cursor.execute(f"SELECT local_id, real_sender_id, message_content FROM {table_name} WHERE local_type = 1 ORDER BY local_id DESC LIMIT 10")
             print("\nRecent messages with sender:")
@@ -98,11 +98,11 @@ for i in range(10):
                     content = content.decode('utf-8', errors='replace')
                 sender_id = row[1]
                 print(f"ID {row[0]}: sender_id={sender_id}, content={repr(content[:50])}")
-            
+
             conn.close()
             temp_msg.unlink()
             break
-        
+
         conn.close()
         temp_msg.unlink()
     except Exception as e:

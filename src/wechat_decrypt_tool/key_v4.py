@@ -50,6 +50,7 @@ def verify_worker(task):
     """Pool worker wrapper for imap_unordered."""
     return check_chunk(*task)
 
+
 # Load Windows DLLs
 kernel32 = ctypes.WinDLL('kernel32', use_last_error=True)
 
@@ -198,7 +199,7 @@ def check_chunk(chunk, buf, internal_db_key=None):
 def is_potential_key(key: bytes, strict: bool = True) -> bool:
     """
     通过熵分析与字符分布快速过滤非密钥的普通文本。
-    
+
     Args:
         key: 32字节的候选密钥
         strict: 是否使用严格模式（默认True）
@@ -207,11 +208,11 @@ def is_potential_key(key: bytes, strict: bool = True) -> bool:
     """
     if len(key) != 32:
         return False
-    
+
     # 检查是否全0
     if key == b'\x00' * 32:
         return False
-    
+
     if strict:
         # 严格模式：原来的过滤条件
         # 1. 过滤字节太单一的数据（如全0，或大量重复字节）
@@ -228,7 +229,7 @@ def is_potential_key(key: bytes, strict: bool = True) -> bool:
         # 至少要有 8 种不同的字节（非常宽松的条件）
         if len(set(key)) < 8:
             return False
-    
+
     return True
 
 
@@ -246,12 +247,12 @@ def get_key_inner(pid, process_infos):
         '''
     rules = yara.compile(source=rules_v4_key)
     pre_addresses = []
-    
+
     for base_address, region_size in process_infos:
         memory = read_process_memory(process_handle, base_address, region_size)
         if not memory:
             continue
-        
+
         matches = rules.match(data=memory)
         if matches:
             for match in matches:
@@ -262,7 +263,7 @@ def get_key_inner(pid, process_infos):
                             offset, content = instance.offset, instance.matched_data
                             addr = read_num(memory, offset, 8)
                             pre_addresses.append(addr)
-    
+
     keys = []
     key_set = set()
     for pre_address in pre_addresses:
@@ -270,7 +271,7 @@ def get_key_inner(pid, process_infos):
         if key not in key_set:
             keys.append(key)
             key_set.add(key)
-    
+
     return keys
 
 
@@ -278,7 +279,7 @@ def get_key(pid, process_handle, buf, internal_db_key=None):
     """获取密钥：扫描进程内存，寻找有效的密钥"""
     global finish_flag
     finish_flag = False  # 重置标志
-    
+
     process_infos = get_memory_regions(process_handle)
 
     def split_list(lst, n):
@@ -291,42 +292,42 @@ def get_key(pid, process_handle, buf, internal_db_key=None):
                                            split_list(process_infos, min(len(process_infos), 40))))
     pool.close()
     pool.join()
-    
+
     raw_keys = []
     for r in results:
         if r:
             raw_keys += r
-            
+
     # 合并去重
     unique_keys = list(set(raw_keys))
-    
+
     print(f"[*] Total raw candidates extracted: {len(unique_keys)}")
-    
+
     # 策略1: 严格模式过滤
     filtered_keys_strict = [k for k in unique_keys if is_potential_key(k, strict=True)]
     print(f"[*] Strict filtering: {len(filtered_keys_strict)} candidates")
-    
+
     if filtered_keys_strict:
         print(f"[*] Testing with strict filtering...")
         key = verify_keys(filtered_keys_strict, buf, internal_db_key)
         if key:
             return key
-    
+
     # 策略2: 宽松模式过滤（如果严格模式失败）
     finish_flag = False  # 重置标志
     filtered_keys_relaxed = [k for k in unique_keys if is_potential_key(k, strict=False)]
     print(f"[*] Relaxed filtering: {len(filtered_keys_relaxed)} candidates")
-    
+
     # 排除已经验证过的严格模式候选
     remaining_keys = [k for k in filtered_keys_relaxed if k not in filtered_keys_strict]
     print(f"[*] Additional candidates to test: {len(remaining_keys)}")
-    
+
     if remaining_keys:
         print(f"[*] Testing with relaxed filtering...")
         key = verify_keys(remaining_keys, buf, internal_db_key)
         if key:
             return key
-    
+
     return None
 
 
@@ -368,32 +369,32 @@ def recover_key(pid, db_file_path=None, internal_db_key=None):
     if not process_handle:
         print(f"[-] Failed to open process {pid}")
         return None
-    
+
     if not db_file_path:
         print("[-] No database file specified")
         CloseHandle(process_handle)
         return None
-    
+
     if not os.path.exists(db_file_path):
         print(f"[-] Database file not found: {db_file_path}")
         CloseHandle(process_handle)
         return None
-    
+
     try:
         with open(db_file_path, 'rb') as f:
             buf = f.read()
-        
+
         if len(buf) < PAGE_SIZE:
             print(f"[-] Database file too small: {len(buf)} bytes")
             CloseHandle(process_handle)
             return None
-        
+
         print(f"[*] Scanning process memory for key candidates...")
         key = get_key(pid, process_handle, buf, internal_db_key)
-        
+
         CloseHandle(process_handle)
         return key
-    
+
     except Exception as e:
         print(f"[-] Error during key recovery: {e}")
         CloseHandle(process_handle)
@@ -403,7 +404,7 @@ def recover_key(pid, db_file_path=None, internal_db_key=None):
 def main():
     """命令行入口函数"""
     freeze_support()
-    
+
     try:
         pm = pymem.Pymem("Weixin.exe")
         pid = pm.process_id
@@ -411,23 +412,23 @@ def main():
     except Exception as e:
         print(f"[-] Failed to connect to Weixin.exe: {e}")
         return 1
-    
+
     try:
         db_path = input("[*] Enter database file path (e.g., favorite_fts.db): ").strip()
     except EOFError:
         print("[-] No input available (running in non-interactive mode)")
         return 1
-    
+
     if not db_path:
         print("[-] No path provided")
         return 1
-    
+
     try:
         raw_internal_db_key = input("[*] Enter internal database key hex (optional, 64 hex chars): ").strip()
     except EOFError:
         print("[*] No internal_db_key provided, using None")
         raw_internal_db_key = ""
-    
+
     internal_db_key = None
     if raw_internal_db_key:
         try:
@@ -443,7 +444,7 @@ def main():
     key = recover_key(pid, db_path, internal_db_key)
     if key:
         key = xor_raw_key(bytes.fromhex(key), internal_db_key).hex()
-    
+
     if key:
         print(f"[+] Successfully recovered key: {key}")
         return 0

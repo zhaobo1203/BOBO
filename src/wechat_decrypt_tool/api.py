@@ -1,4 +1,4 @@
-﻿"""微信解密工具的FastAPI Web服务器"""
+"""微信解密工具的FastAPI Web服务器"""
 
 import os
 from pathlib import Path
@@ -199,7 +199,7 @@ async def _shutdown_wcdb_realtime() -> None:
         CHAT_REALTIME_AUTOSYNC.stop()
     except Exception:
         pass
-    
+
     # Uninstall img_helper hook if enabled
     try:
         IMG_HELPER.disable()

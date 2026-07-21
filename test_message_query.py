@@ -63,12 +63,12 @@ if 'SessionTable' in tables:
     print(f"\nSessionTable 表字段:")
     for col in columns:
         print(f"  - {col[1]}: {col[2]}")
-    
+
     # 查看 SessionTable 中的群聊会话
     print(f"\n查看 SessionTable 中的群聊会话...")
     cursor.execute("""
-        SELECT username, last_timestamp 
-        FROM SessionTable 
+        SELECT username, last_timestamp
+        FROM SessionTable
         WHERE username LIKE '%@chatroom'
         ORDER BY last_timestamp DESC
         LIMIT 10
@@ -100,9 +100,9 @@ group_id = "59157387978@chatroom"  # AI测试群
 for msg_db_path in message_dbs:
     if not os.path.exists(msg_db_path):
         continue
-    
+
     print(f"\n检查 {os.path.basename(msg_db_path)}...")
-    
+
     # 解密消息数据库
     decrypted_msg_db = os.path.join(temp_dir, os.path.basename(msg_db_path))
     try:
@@ -112,30 +112,30 @@ for msg_db_path in message_dbs:
     except Exception as e:
         print(f"  解密异常: {e}")
         continue
-    
+
     # 连接解密后的数据库
     msg_conn = sqlite3.connect(decrypted_msg_db)
     msg_conn.row_factory = sqlite3.Row
     msg_cursor = msg_conn.cursor()
-    
+
     # 检查表结构
     msg_cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
     msg_tables = [row[0] for row in msg_cursor.fetchall()]
     print(f"  表: {msg_tables}")
-    
+
     # 查找包含群消息的表
     for table in msg_tables:
         if 'MSG' in table.upper() or 'MESSAGE' in table.upper() or table.upper().startswith('MSG'):
             msg_cursor.execute(f"PRAGMA table_info({table})")
             cols = [col[1] for col in msg_cursor.fetchall()]
             print(f"  {table} 字段: {cols}")
-            
+
             # 尝试查询群消息
             try:
                 # 检查是否有 session_username 字段
                 if 'session_username' in cols:
                     msg_cursor.execute(f"""
-                        SELECT * FROM {table} 
+                        SELECT * FROM {table}
                         WHERE session_username = ?
                         ORDER BY create_time DESC
                         LIMIT 5
@@ -147,7 +147,7 @@ for msg_db_path in message_dbs:
                             print(f"    - {dict(row)}")
                 elif 'username' in cols:
                     msg_cursor.execute(f"""
-                        SELECT * FROM {table} 
+                        SELECT * FROM {table}
                         WHERE username = ?
                         ORDER BY create_time DESC
                         LIMIT 5
@@ -159,7 +159,7 @@ for msg_db_path in message_dbs:
                             print(f"    - {dict(row)}")
             except Exception as e:
                 print(f"  查询失败: {e}")
-    
+
     msg_conn.close()
 
 conn.close()

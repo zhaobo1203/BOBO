@@ -34,7 +34,7 @@ for i, msg in enumerate(messages, 1):
     if isinstance(content, bytes):
         content = content.decode('utf-8', errors='replace')
     content_preview = content[:60] if content else '(空)'
-    
+
     print(f'{i}. [{time_str}] {sender}: {content_preview}')
 
 close_account(handle)

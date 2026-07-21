@@ -29,8 +29,8 @@ for col in columns:
 # 查看群聊记录
 print('\nGroup examples (first 10):')
 cursor.execute('''
-    SELECT username, nick_name, remark, alias 
-    FROM contact 
+    SELECT username, nick_name, remark, alias
+    FROM contact
     WHERE username LIKE '%@chatroom'
     LIMIT 10
 ''')
@@ -44,8 +44,8 @@ for row in cursor.fetchall():
 # 搜索包含"AI"或"测试"的群
 print('Search for "AI" or "test":')
 cursor.execute('''
-    SELECT username, nick_name, remark, alias 
-    FROM contact 
+    SELECT username, nick_name, remark, alias
+    FROM contact
     WHERE username LIKE '%@chatroom'
     AND (nick_name LIKE '%AI%' OR nick_name LIKE '%测试%' OR remark LIKE '%AI%' OR remark LIKE '%测试%')
     LIMIT 10

@@ -59,20 +59,20 @@ def _can_use_logging_stream(stream) -> bool:
 
 class WeChatLogger:
     """微信解密工具统一日志管理器"""
-    
+
     _instance: Optional['WeChatLogger'] = None
     _initialized = False
-    
+
     def __new__(cls):
         if cls._instance is None:
             cls._instance = super().__new__(cls)
         return cls._instance
-    
+
     def __init__(self):
         # Lazy-init in `setup_logging()` / accessors to avoid double-initialization when
         # callers instantiate the manager and then call `setup_logging()` again.
         pass
-    
+
     def setup_logging(self, log_level: str = "DEBUG"):
         """设置日志配置"""
         # Allow overriding via env var for easier debugging (e.g. WECHAT_TOOL_LOG_LEVEL=DEBUG)
@@ -92,7 +92,7 @@ class WeChatLogger:
 
         log_dir = get_output_dir() / "logs" / str(now.year) / f"{now.month:02d}" / f"{now.day:02d}"
         log_dir.mkdir(parents=True, exist_ok=True)
-        
+
         # 设置日志文件名
         date_str = now.strftime("%d")
         desired_log_file = log_dir / f"{date_str}_wechat_tool.log"
@@ -127,7 +127,7 @@ class WeChatLogger:
                 return self.log_file
 
         self.log_file = desired_log_file
-        
+
         # 清除现有的处理器
         for handler in root_logger.handlers[:]:
             root_logger.removeHandler(handler)
@@ -135,7 +135,7 @@ class WeChatLogger:
                 handler.close()
             except Exception:
                 pass
-        
+
         # 配置日志格式
         # 文件格式（无颜色）
         file_formatter = logging.Formatter(
@@ -160,13 +160,13 @@ class WeChatLogger:
             console_handler = logging.StreamHandler(sys.stdout)
             console_handler.setFormatter(console_formatter)
             console_handler.setLevel(level)
-        
+
         # 配置根日志器
         root_logger.setLevel(level)
         root_logger.addHandler(file_handler)
         if console_handler is not None:
             root_logger.addHandler(console_handler)
-        
+
         # 只为uvicorn日志器添加文件处理器，保持其原有的控制台处理器（带颜色）
         uvicorn_logger = logging.getLogger("uvicorn")
         for handler in uvicorn_logger.handlers[:]:
@@ -215,7 +215,7 @@ class WeChatLogger:
         if console_handler is not None:
             fastapi_logger.addHandler(console_handler)
         fastapi_logger.setLevel(level)
-        
+
         # 记录初始化信息
         logger = logging.getLogger(__name__)
         logger.info("=" * 60)
@@ -225,13 +225,13 @@ class WeChatLogger:
         logger.info("=" * 60)
 
         WeChatLogger._initialized = True
-        
+
         return self.log_file
-    
+
     def get_logger(self, name: str) -> logging.Logger:
         """获取指定名称的日志器"""
         return logging.getLogger(name)
-    
+
     def get_log_file_path(self) -> Path:
         """获取当前日志文件路径"""
         if not hasattr(self, "log_file"):

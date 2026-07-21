@@ -48,7 +48,7 @@ if row and row[0]:
     print("=== 原始 hex 数据 ===")
     print(data.hex())
     print("\n=== 逐字节解析 ===")
-    
+
     # 手动解析
     i = 0
     while i < len(data):
@@ -58,12 +58,12 @@ if row and row[0]:
             length = data[i]
             print(f"  字段类型: 0x0a (成员), 长度={length}")
             i += 1
-            
+
             # 打印整个 block
             block = data[i:i+length]
             print(f"  Block hex: {block.hex()}")
             print(f"  Block 内容: {block}")
-            
+
             # 解析 block 内部
             j = 0
             while j < len(block):
@@ -96,7 +96,7 @@ if row and row[0]:
                 else:
                     print(f"    未知字段 0x{block[j]:02x}")
                     j += 1
-            
+
             i += length
         else:
             i += 1
@@ -112,18 +112,18 @@ for i in range(10):
     msg_db = db_storage / "message" / f"message_{i}.db"
     if not msg_db.exists():
         continue
-    
+
     temp_msg = Path(f"temp_msg_test_{i}.db")
     try:
         decryptor.decrypt_database(str(msg_db), str(temp_msg))
         conn2 = sqlite3.connect(str(temp_msg))
         cursor2 = conn2.cursor()
-        
+
         cursor2.execute(f"SELECT name FROM sqlite_master WHERE type='table' AND name='{table_name}'")
         if cursor2.fetchone():
             cursor2.execute(f"SELECT DISTINCT real_sender_id FROM \"{table_name}\" ORDER BY real_sender_id")
             print(f"real_sender_id 列表: {[row[0] for row in cursor2.fetchall()]}")
-        
+
         conn2.close()
         temp_msg.unlink()
         break

@@ -102,7 +102,7 @@ def check_python_version() -> bool:
 def check_dependencies() -> Dict[str, bool]:
     """检查依赖库"""
     print_subheader("检查依赖库")
-    
+
     dependencies = {
         'cryptography': 'cryptography',
         'psutil': 'psutil',
@@ -111,13 +111,13 @@ def check_dependencies() -> Dict[str, bool]:
         'zstandard': 'zstandard',
         'requests': 'requests',
     }
-    
+
     # Windows 特有依赖
     if sys.platform == 'win32':
         dependencies['pywin32'] = 'win32api'
         dependencies['pymem'] = 'pymem'
         dependencies['wx_key'] = 'wx_key'
-    
+
     results = {}
     for name, module in dependencies.items():
         try:
@@ -127,37 +127,37 @@ def check_dependencies() -> Dict[str, bool]:
         except ImportError as e:
             print_result(name, False, str(e))
             results[name] = False
-    
+
     return results
 
 
 def check_native_libs() -> Dict[str, bool]:
     """检查原生库"""
     print_subheader("检查原生库")
-    
+
     native_dir = PROJECT_ROOT / "src" / "wechat_decrypt_tool" / "native"
     results = {}
-    
+
     dlls = ['wcdb_api.dll', 'WCDB.dll', 'VoipEngine.dll', 'img_helper.dll']
     for dll in dlls:
         dll_path = native_dir / dll
         exists = dll_path.exists()
         print_result(dll, exists, str(dll_path) if exists else "未找到")
         results[dll] = exists
-    
+
     # 检查 pyd 文件
     pyd_files = list(native_dir.glob("wce_integrity*.pyd"))
     pyd_ok = len(pyd_files) > 0
     print_result("wce_integrity.pyd", pyd_ok, str(pyd_files[0]) if pyd_files else "未找到")
     results['wce_integrity'] = pyd_ok
-    
+
     return results
 
 
 def check_project_structure() -> bool:
     """检查项目结构"""
     print_subheader("检查项目结构")
-    
+
     required_paths = [
         ("src/wechat_core/__init__.py", True),
         ("src/wechat_core/process_manager.py", True),
@@ -169,7 +169,7 @@ def check_project_structure() -> bool:
         ("pyproject.toml", True),
         ("key_store.json", False),  # 可选
     ]
-    
+
     all_ok = True
     for path, required in required_paths:
         full_path = PROJECT_ROOT / path
@@ -181,28 +181,28 @@ def check_project_structure() -> bool:
             all_ok = False
         else:
             print_result(path, False, "可选文件")
-    
+
     return all_ok
 
 
 def run_environment_check():
     """运行环境检查"""
     print_header("环境检查")
-    
+
     results = {}
-    
+
     # Python 版本
     results['python'] = check_python_version()
-    
+
     # 依赖库
     results['dependencies'] = check_dependencies()
-    
+
     # 原生库
     results['native'] = check_native_libs()
-    
+
     # 项目结构
     results['structure'] = check_project_structure()
-    
+
     return results
 
 
@@ -213,7 +213,7 @@ def run_environment_check():
 def test_tn01():
     """测试 TN-01: 微信进程管理"""
     print_header("TN-01: 微信进程管理")
-    
+
     try:
         from wechat_core import (
             detect_wechat_process,
@@ -225,7 +225,7 @@ def test_tn01():
     except ImportError as e:
         print_result("模块导入", False, str(e))
         return False
-    
+
     # 检测微信进程
     print_subheader("检测微信进程")
     try:
@@ -239,7 +239,7 @@ def test_tn01():
     except Exception as e:
         print_result("微信进程检测", False, str(e))
         return False
-    
+
     # 检测微信安装路径
     print_subheader("检测微信安装路径")
     try:
@@ -251,7 +251,7 @@ def test_tn01():
             print_result("微信安装路径", False, "未检测到微信安装")
     except Exception as e:
         print_result("微信安装路径检测", False, str(e))
-    
+
     return True
 
 
@@ -262,7 +262,7 @@ def test_tn01():
 def test_tn02():
     """测试 TN-02: 当前登录账号检测"""
     print_header("TN-02: 当前登录账号检测")
-    
+
     try:
         from wechat_core import (
             auto_detect_wechat_data_dirs,
@@ -274,7 +274,7 @@ def test_tn02():
     except ImportError as e:
         print_result("模块导入", False, str(e))
         return False
-    
+
     # 检测数据目录
     print_subheader("检测微信数据目录")
     try:
@@ -288,7 +288,7 @@ def test_tn02():
     except Exception as e:
         print_result("数据目录检测", False, str(e))
         return False
-    
+
     # 检测当前登录账号
     print_subheader("检测当前登录账号")
     try:
@@ -301,7 +301,7 @@ def test_tn02():
             print_result("当前账号", False, "未检测到登录账号，请确保微信已登录")
     except Exception as e:
         print_result("当前账号检测", False, str(e))
-    
+
     # 列出所有账号
     if data_dirs:
         print_subheader("列出所有账号")
@@ -315,7 +315,7 @@ def test_tn02():
                 print_result("账号列表", False, "未找到账号")
         except Exception as e:
             print_result("账号列表", False, str(e))
-    
+
     return True
 
 
@@ -326,7 +326,7 @@ def test_tn02():
 def test_tn03():
     """测试 TN-03: 密钥管理"""
     print_header("TN-03: 密钥管理")
-    
+
     try:
         from wechat_core import (
             check_wx_key_available,
@@ -339,7 +339,7 @@ def test_tn03():
     except ImportError as e:
         print_result("模块导入", False, str(e))
         return False
-    
+
     # 检查 wx_key 模块
     print_subheader("检查 wx_key 模块")
     try:
@@ -347,7 +347,7 @@ def test_tn03():
         print_result("wx_key 模块", wx_key_ok, "可用" if wx_key_ok else "不可用")
     except Exception as e:
         print_result("wx_key 模块检查", False, str(e))
-    
+
     # 加载密钥存储
     print_subheader("加载密钥存储")
     try:
@@ -363,7 +363,7 @@ def test_tn03():
             print_result("密钥存储", False, "未找到密钥存储文件")
     except Exception as e:
         print_result("密钥存储加载", False, str(e))
-    
+
     return True
 
 
@@ -374,7 +374,7 @@ def test_tn03():
 def test_tn04():
     """测试 TN-04: 数据库解密"""
     print_header("TN-04: 数据库解密")
-    
+
     try:
         from wechat_core import (
             find_database_files,
@@ -387,25 +387,25 @@ def test_tn04():
     except ImportError as e:
         print_result("模块导入", False, str(e))
         return False
-    
+
     # 获取密钥和数据目录
     try:
         from wechat_core import load_key_store, detect_current_logged_in_account, auto_detect_wechat_data_dirs
         from wechat_core.account_detector import get_account_info
     except ImportError:
         pass
-    
+
     # 加载密钥
     key_store = load_key_store() if 'load_key_store' in dir() else None
     if not key_store:
         print_result("密钥存储", False, "请先运行 TN-03 获取密钥")
         return False
-    
+
     accounts = key_store.get('accounts', {})
     if not accounts:
         print_result("账号密钥", False, "没有保存的密钥")
         return False
-    
+
     # 获取第一个有效账号
     account_id = None
     db_key = None
@@ -414,18 +414,18 @@ def test_tn04():
             account_id = acc
             db_key = info.get('db_key')
             break
-    
+
     if not db_key:
         print_result("有效密钥", False, "没有有效的密钥")
         return False
-    
+
     print_subheader(f"测试账号: {account_id}")
     print(f"  密钥: {db_key[:16]}...")
-    
+
     # 查找数据库文件
     print_subheader("查找数据库文件")
     data_dirs = auto_detect_wechat_data_dirs() if 'auto_detect_wechat_data_dirs' in dir() else []
-    
+
     db_storage = None
     for data_dir in data_dirs:
         import glob
@@ -433,26 +433,26 @@ def test_tn04():
         if matches:
             db_storage = Path(matches[0])
             break
-    
+
     if not db_storage:
         # 尝试从 key_store 获取路径
         account_info = accounts.get(account_id, {})
         data_path = account_info.get('data_path', '')
         if data_path:
             db_storage = Path(data_path) / "db_storage" if 'db_storage' not in data_path else Path(data_path)
-    
+
     if not db_storage or not db_storage.exists():
         print_result("数据库目录", False, f"未找到 {account_id} 的数据库目录")
         return False
-    
+
     print_result("数据库目录", True, str(db_storage))
-    
+
     # 测试解密 session.db
     session_db = db_storage / "session" / "session.db"
     if not session_db.exists():
         # 尝试其他路径
         session_db = db_storage / "session.db"
-    
+
     if session_db.exists():
         print_subheader("测试解密 session.db")
         temp_db = tempfile.mktemp(suffix='.db')
@@ -478,12 +478,12 @@ def test_tn04():
                 pass
     else:
         print_result("session.db", False, "文件不存在")
-    
+
     # 测试解密 contact.db
     contact_db = db_storage / "contact" / "contact.db"
     if not contact_db.exists():
         contact_db = db_storage / "contact.db"
-    
+
     if contact_db.exists():
         print_subheader("测试解密 contact.db")
         temp_db = tempfile.mktemp(suffix='.db')
@@ -508,7 +508,7 @@ def test_tn04():
                 pass
     else:
         print_result("contact.db", False, "文件不存在")
-    
+
     return True
 
 
@@ -519,7 +519,7 @@ def test_tn04():
 def test_tn05():
     """测试 TN-05: WCDB 实时监听"""
     print_header("TN-05: WCDB 实时监听")
-    
+
     try:
         from wechat_decrypt_tool.wcdb_realtime import (
             open_account as wcdb_open_account,
@@ -532,96 +532,96 @@ def test_tn05():
     except ImportError as e:
         print_result("模块导入", False, str(e))
         return False
-    
+
     # 获取密钥和数据库路径
     from wechat_core import load_key_store, auto_detect_wechat_data_dirs
     import glob
-    
+
     key_store = load_key_store()
     if not key_store:
         print_result("密钥存储", False, "请先运行 TN-03")
         return False
-    
+
     accounts = key_store.get('accounts', {})
     account_id = None
     db_key = None
-    
+
     for acc, info in accounts.items():
         if info.get('db_key'):
             account_id = acc
             db_key = info.get('db_key')
             break
-    
+
     if not db_key:
         print_result("有效密钥", False)
         return False
-    
+
     print_subheader(f"账号: {account_id}")
     print(f"  密钥: {db_key[:16]}...")
-    
+
     # 查找 session.db
     data_dirs = auto_detect_wechat_data_dirs()
     session_db = None
-    
+
     for data_dir in data_dirs:
         matches = glob.glob(str(Path(data_dir) / f"{account_id}_*" / "db_storage" / "session" / "session.db"))
         if matches:
             session_db = Path(matches[0])
             break
-    
+
     if not session_db:
         print_result("session.db", False, "未找到")
         return False
-    
+
     print_result("session.db", True, str(session_db))
-    
+
     # 测试 WCDB 连接
     print_subheader("测试 WCDB 连接")
     print("  正在初始化 WCDB (可能需要几秒)...")
-    
+
     start_time = time.time()
     try:
         handle = wcdb_open_account(str(session_db), db_key)
         elapsed = time.time() - start_time
-        
+
         if handle > 0:
             print_result("WCDB 连接", True, f"handle={handle}, 耗时={elapsed:.2f}s")
-            
+
             # 获取会话列表
             print_subheader("获取会话列表")
             sessions = wcdb_get_sessions(handle)
             groups = [s for s in sessions if s.get('username', '').endswith('@chatroom')]
             print_result("会话列表", True, f"共 {len(sessions)} 个会话，{len(groups)} 个群聊")
-            
+
             for g in groups[:5]:
                 print(f"       {g.get('display_name', g.get('username', '未知'))}")
-            
+
             # 获取消息
             if groups:
                 print_subheader("获取群消息测试")
                 group_id = groups[0].get('username')
                 messages = wcdb_get_messages(handle, group_id, limit=5)
                 print_result("消息获取", True, f"获取 {len(messages)} 条消息")
-                
+
                 for msg in messages[:3]:
                     content = msg.get('message_content', '')
                     if isinstance(content, bytes):
                         content = content.decode('utf-8', errors='replace')
                     sender = msg.get('sender_username', '未知')
                     print(f"       {sender}: {content[:50]}...")
-            
+
             # 关闭连接
             wcdb_close_account(handle)
             print_result("关闭连接", True)
-            
+
         else:
             print_result("WCDB 连接", False, f"handle={handle}")
-            
+
     except Exception as e:
         elapsed = time.time() - start_time
         print_result("WCDB 连接", False, f"耗时={elapsed:.2f}s, 错误={e}")
         return False
-    
+
     # 获取原生日志
     print_subheader("WCDB 原生日志")
     try:
@@ -634,7 +634,7 @@ def test_tn05():
             print_result("原生日志", True, "无日志")
     except Exception as e:
         print_result("原生日志", False, str(e))
-    
+
     return True
 
 
@@ -645,7 +645,7 @@ def test_tn05():
 def test_tn06():
     """测试 TN-06: 群消息提取"""
     print_header("TN-06: 群消息提取")
-    
+
     try:
         from wechat_core import (
             get_group_messages_from_decrypted_db,
@@ -658,10 +658,10 @@ def test_tn06():
     except ImportError as e:
         print_result("模块导入", False, str(e))
         return False
-    
+
     # 使用已有的测试脚本
     print_subheader("执行完整群消息测试")
-    
+
     test_script = PROJECT_ROOT / "test_tn_all_final.py"
     if test_script.exists():
         print("  运行 test_tn_all_final.py...")
@@ -673,7 +673,7 @@ def test_tn06():
                 timeout=60,
                 cwd=str(PROJECT_ROOT)
             )
-            
+
             if result.returncode == 0:
                 print_result("测试脚本", True)
                 # 显示部分输出
@@ -689,7 +689,7 @@ def test_tn06():
             print_result("测试脚本", False, str(e))
     else:
         print_result("测试脚本", False, "test_tn_all_final.py 不存在")
-    
+
     return True
 
 
@@ -700,13 +700,13 @@ def test_tn06():
 def monitor_group(group_name: str = None, realtime: bool = False, limit: int = 20):
     """监听群消息"""
     monitor_script = PROJECT_ROOT / "src" / "monitor_group_simple.py"
-    
+
     if not monitor_script.exists():
         print("[错误] monitor_group_simple.py 不存在")
         return
-    
+
     cmd = [sys.executable, str(monitor_script)]
-    
+
     if group_name:
         cmd.extend(["-g", group_name])
         if realtime:
@@ -714,7 +714,7 @@ def monitor_group(group_name: str = None, realtime: bool = False, limit: int = 2
         cmd.extend(["-n", str(limit)])
     else:
         cmd.append("--list")
-    
+
     try:
         subprocess.run(cmd, cwd=str(PROJECT_ROOT))
     except KeyboardInterrupt:
@@ -743,7 +743,7 @@ def main():
   python debug_all.py --list-groups      # 列出所有群聊
         """
     )
-    
+
     parser.add_argument('--quick', action='store_true', help='快速检查（仅检查环境和依赖）')
     parser.add_argument('--tn01', action='store_true', help='仅测试 TN-01')
     parser.add_argument('--tn02', action='store_true', help='仅测试 TN-02')
@@ -755,14 +755,14 @@ def main():
     parser.add_argument('--list-groups', action='store_true', help='列出所有群聊')
     parser.add_argument('--realtime', action='store_true', help='实时监听模式')
     parser.add_argument('--limit', type=int, default=20, help='消息数量限制')
-    
+
     args = parser.parse_args()
-    
+
     print("=" * 60)
     print("微信群消息监听系统 - 调试脚本")
     print(f"运行时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print("=" * 60)
-    
+
     # 根据参数执行不同测试
     if args.quick:
         run_environment_check()
@@ -783,7 +783,7 @@ def main():
     else:
         # 运行完整诊断
         print("\n开始完整诊断...\n")
-        
+
         run_environment_check()
         test_tn01()
         test_tn02()
@@ -791,7 +791,7 @@ def main():
         test_tn04()
         test_tn05()
         test_tn06()
-        
+
         print_header("诊断完成")
         print("\n提示:")
         print("  - 如需监听群消息: python debug_all.py --monitor 群名称")

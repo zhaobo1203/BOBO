@@ -55,8 +55,8 @@ for col in columns:
 
 # 查找群聊
 cursor.execute("""
-    SELECT username, alias, nick_name, remark 
-    FROM contact 
+    SELECT username, alias, nick_name, remark
+    FROM contact
     WHERE username LIKE '%@chatroom'
     LIMIT 10
 """)
@@ -73,10 +73,12 @@ print("\n\n=== 群聊消息表名映射 ===")
 print("WCDB 使用 MD5(群ID) 作为消息表名后缀")
 print("例如: Msg_<MD5(group_id)>")
 
+
 def get_msg_table_name(username: str) -> str:
     """计算消息表名"""
     md5 = hashlib.md5(username.encode()).hexdigest()
     return f"Msg_{md5}"
+
 
 # 测试几个群ID
 test_groups = [

@@ -206,7 +206,6 @@ def parse_global_config(base_path: str) -> dict:
                 pass
             return None
 
-
         wxid = extract_mmkv_string(decrypted, 'mmkv_key_user_name')
         nickname = extract_mmkv_string(decrypted, 'mmkv_key_nick_name')
         avatar_url = extract_mmkv_string(decrypted, 'mmkv_key_head_img_url')
@@ -229,6 +228,7 @@ def parse_global_config(base_path: str) -> dict:
     except Exception as e:
         print(f"[DEBUG] 解析 global_config 失败: {e}")
         return None
+
 
 def find_wechat_databases() -> List[str]:
     """在新的xwechat_files目录中查找微信数据库文件

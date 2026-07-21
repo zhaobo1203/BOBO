@@ -12,7 +12,7 @@ from typing import Dict
 
 class ErrorCode:
     """统一错误码定义
-    
+
     按技术规格报告定义的错误码：
     - ERR_PROC_*: 进程管理 (TN-01)
     - ERR_ACCOUNT_*: 账号检测 (TN-02)
@@ -21,33 +21,33 @@ class ErrorCode:
     - ERR_WCDB_*: 实时监听 (TN-05)
     - ERR_MSG_*: 消息处理 (TN-06)
     """
-    
+
     # TN-01: 进程管理
     ERR_PROC_001 = "微信进程不存在"
     ERR_PROC_002 = "无法终止微信进程"
     ERR_PROC_003 = "微信安装路径未找到"
     ERR_PROC_004 = "微信启动失败"
-    
+
     # TN-02: 账号检测
     ERR_ACCOUNT_001 = "无微信进程运行"
     ERR_ACCOUNT_002 = "无法获取文件句柄"
     ERR_ACCOUNT_003 = "数据目录不存在"
     ERR_ACCOUNT_004 = "账号ID格式错误"
-    
+
     # TN-03: 密钥获取
     ERR_KEY_001 = "进程不存在"
     ERR_KEY_002 = "内存扫描失败"
     ERR_KEY_003 = "密钥验证失败"
     ERR_KEY_004 = "Hook注入失败"
     ERR_KEY_005 = "wx_key模块不可用"
-    
+
     # TN-04: 数据库解密
     ERR_DECRYPT_001 = "密钥格式错误"
     ERR_DECRYPT_002 = "数据库文件不存在"
     ERR_DECRYPT_003 = "解密失败（密钥错误）"
     ERR_DECRYPT_004 = "写入文件失败"
     ERR_DECRYPT_005 = "数据库损坏"
-    
+
     # TN-05: 实时监听
     ERR_WCDB_001 = "数据库文件不存在"
     ERR_WCDB_002 = "密钥错误"
@@ -55,7 +55,7 @@ class ErrorCode:
     ERR_WCDB_004 = "无效句柄"
     ERR_WCDB_005 = "会话不存在"
     ERR_WCDB_006 = "连接超时"
-    
+
     # TN-06: 消息处理
     ERR_MSG_001 = "消息内容解码失败"
     ERR_MSG_002 = "发送者信息获取失败"
@@ -152,20 +152,20 @@ LOG_EVENTS = {
     "PROC_DETECT": "进程检测",
     "PROC_KILL": "进程终止",
     "PROC_LAUNCH": "微信启动",
-    
+
     # 账号检测
     "ACCOUNT_DETECT": "账号检测",
     "ACCOUNT_MATCH": "账号匹配",
-    
+
     # 密钥获取
     "KEY_LOAD": "密钥加载",
     "KEY_SCAN": "内存扫描",
     "KEY_HOOK": "Hook注入",
-    
+
     # 数据库解密
     "DB_DECRYPT": "数据库解密",
     "DB_VERIFY": "解密验证",
-    
+
     # 消息监听
     "MSG_POLL": "消息轮询",
     "MSG_NEW": "新消息",

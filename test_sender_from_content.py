@@ -69,38 +69,38 @@ for i in range(10):
     msg_db = db_storage / "message" / f"message_{i}.db"
     if not msg_db.exists():
         continue
-    
+
     temp_msg = Path(f"temp_msg_{i}.db")
     try:
         decryptor.decrypt_database(str(msg_db), str(temp_msg))
         conn = sqlite3.connect(str(temp_msg))
         cursor = conn.cursor()
-        
+
         cursor.execute(f"SELECT name FROM sqlite_master WHERE type='table' AND name='{table_name}'")
         if cursor.fetchone():
             cursor.execute(f"""
-                SELECT local_id, real_sender_id, message_content, source 
-                FROM "{table_name}" 
-                WHERE local_type = 1 
-                ORDER BY local_id DESC 
+                SELECT local_id, real_sender_id, message_content, source
+                FROM "{table_name}"
+                WHERE local_type = 1
+                ORDER BY local_id DESC
                 LIMIT 20
             """)
-            
+
             for row in cursor.fetchall():
                 content = row[2]
                 if isinstance(content, bytes):
                     content = content.decode('utf-8', errors='replace')
-                
+
                 source = row[3]
                 if isinstance(source, bytes):
                     source = source.decode('utf-8', errors='replace')
-                
+
                 sender_id = row[1]
-                
+
                 # 尝试从内容中提取发送者
                 # 格式: "昵称:\n内容" 或 "昵称:\n"
                 sender_from_content = None
-                
+
                 # 检查是否是自己发的消息
                 # 如果 real_sender_id 较小 (如2)，可能是自己
                 if sender_id <= 10:
@@ -111,13 +111,13 @@ for i in range(10):
                         match = re.match(r'^([^:]+):\n', content)
                         if match:
                             sender_from_content = match.group(1)
-                
+
                 # 显示结果
                 print(f"\nmsg_id={row[0]}: sender_id={sender_id}")
                 print(f"  发送者: {sender_from_content or '未知'}")
                 print(f"  内容: {repr(content[:50])}")
                 print(f"  source: {repr(source[:100]) if source else '空'}")
-        
+
         conn.close()
         temp_msg.unlink()
         break

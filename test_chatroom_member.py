@@ -99,13 +99,13 @@ for i in range(10):
     msg_db = db_storage / "message" / f"message_{i}.db"
     if not msg_db.exists():
         continue
-    
+
     temp_msg = Path(f"temp_msg_test_{i}.db")
     try:
         decryptor.decrypt_database(str(msg_db), str(temp_msg))
         conn2 = sqlite3.connect(str(temp_msg))
         cursor2 = conn2.cursor()
-        
+
         cursor2.execute(f"SELECT name FROM sqlite_master WHERE type='table' AND name='{table_name}'")
         if cursor2.fetchone():
             # 查看完整字段列表
@@ -113,7 +113,7 @@ for i in range(10):
             print(f"\n表 {table_name} 字段:")
             for col in cursor2.fetchall():
                 print(f"  {col[1]} ({col[2]})")
-            
+
             # 查看一条完整消息
             cursor2.execute(f"SELECT * FROM \"{table_name}\" WHERE local_type = 1 ORDER BY local_id DESC LIMIT 1")
             cols = [desc[0] for desc in cursor2.description]
@@ -128,7 +128,7 @@ for i in range(10):
                         except:
                             val = "<binary>"
                     print(f"  {col}: {repr(val)[:100]}")
-        
+
         conn2.close()
         temp_msg.unlink()
         break

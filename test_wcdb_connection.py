@@ -37,14 +37,14 @@ print("Step 5: Testing WCDB connection (timeout=10s)...")
 try:
     handle = open_account(str(session_db), db_key, timeout=10.0)
     print(f'WCDB connected: handle={handle}')
-    
+
     print("Step 6: Getting sessions...")
     sessions = get_sessions(handle)
     print(f'Sessions count: {len(sessions)}')
-    
+
     groups = [s for s in sessions if '@chatroom' in s.get('username', '')]
     print(f'Groups count: {len(groups)}')
-    
+
     close_account(handle)
     print('WCDB connection closed')
 except Exception as e:

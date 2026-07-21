@@ -90,7 +90,7 @@ def get_memory_regions(process_handle):
     regions = []
     mbi = MEMORY_BASIC_INFORMATION()
     address = 0
-    
+
     while ctypes.windll.kernel32.VirtualQueryEx(
             process_handle,
             ctypes.c_void_p(address),
@@ -103,7 +103,7 @@ def get_memory_regions(process_handle):
             if mbi.Protect != 0 and not (mbi.Protect & 0x01):  # 不是 PAGE_NOACCESS
                 regions.append((mbi.BaseAddress, mbi.RegionSize))
         address += mbi.RegionSize
-    
+
     return regions
 
 
@@ -123,25 +123,25 @@ def is_ok(passphrase, buf, internal_db_key=None):
     global finish_flag
     if finish_flag:
         return False
-    
+
     salt = buf[:SALT_SIZE]
     mac_salt = bytes(x ^ 0x3a for x in salt)
     passphrase = xor_raw_key(passphrase, internal_db_key)
     new_key = PBKDF2(passphrase, salt, dkLen=KEY_SIZE, count=ROUND_COUNT, hmac_hash_module=SHA512)
     mac_key = PBKDF2(new_key, mac_salt, dkLen=KEY_SIZE, count=2, hmac_hash_module=SHA512)
-    
+
     reserve = IV_SIZE + HMAC_SHA512_SIZE
     reserve = ((reserve + AES_BLOCK_SIZE - 1) // AES_BLOCK_SIZE) * AES_BLOCK_SIZE
-    
+
     start = SALT_SIZE
     end = PAGE_SIZE
     mac = hmac.new(mac_key, buf[start:end - reserve + IV_SIZE], SHA512)
     mac.update(struct.pack('<I', 1))
     hash_mac = mac.digest()
-    
+
     hash_mac_start_offset = end - reserve + IV_SIZE
     hash_mac_end_offset = hash_mac_start_offset + len(hash_mac)
-    
+
     if hash_mac == buf[hash_mac_start_offset:hash_mac_end_offset]:
         print(f"[+] Found valid key!")
         finish_flag = True
@@ -153,50 +153,50 @@ def is_high_entropy(data: bytes, min_unique_bytes: int = 16) -> bool:
     """检查数据是否具有高熵（足够随机）"""
     if len(data) != KEY_SIZE:
         return False
-    
+
     # 检查是否全 0
     if data == b'\x00' * KEY_SIZE:
         return False
-    
+
     # 检查唯一字节数量
     unique_bytes = len(set(data))
     if unique_bytes < min_unique_bytes:
         return False
-    
+
     return True
 
 
 def scan_memory_region_for_keys(args):
     """扫描单个内存区域，提取高熵数据块"""
     pid, base_address, region_size, buf, internal_db_key = args
-    
+
     process_handle = open_process(pid)
     if not process_handle:
         return []
-    
+
     try:
         memory = read_process_memory(process_handle, base_address, region_size)
         if not memory:
             return []
-        
+
         candidates = []
-        
+
         # 步进为 8 字节（对齐），扫描每个 32 字节块
         step = 8
         for offset in range(0, len(memory) - KEY_SIZE, step):
             chunk = memory[offset:offset + KEY_SIZE]
-            
+
             # 快速过滤：检查是否是高熵数据
             if not is_high_entropy(chunk):
                 continue
-            
+
             # 尝试验证
             if is_ok(chunk, buf, internal_db_key):
                 candidates.append(chunk)
                 break  # 找到就退出
-        
+
         return candidates
-    
+
     finally:
         CloseHandle(process_handle)
 
@@ -204,57 +204,57 @@ def scan_memory_region_for_keys(args):
 def brute_force_search_key(pid, db_path, internal_db_key=None, max_regions=None):
     """
     暴力搜索内存中的密钥
-    
+
     Args:
         pid: 微信进程 PID
         db_path: 数据库文件路径（用于验证）
         internal_db_key: XOR 掩码密钥（可选）
         max_regions: 最大扫描区域数（可选，用于限制扫描范围）
-    
+
     Returns:
         找到的密钥（64 位十六进制字符串）或 None
     """
     global finish_flag
     finish_flag = False
-    
+
     # 读取数据库文件
     with open(db_path, 'rb') as f:
         buf = f.read()
-    
+
     if len(buf) < PAGE_SIZE:
         print(f"[-] Database file too small: {len(buf)} bytes")
         return None
-    
+
     # 打开进程
     process_handle = open_process(pid)
     if not process_handle:
         print(f"[-] Failed to open process {pid}")
         return None
-    
+
     # 获取内存区域
     print("[*] Getting memory regions...")
     regions = get_memory_regions(process_handle)
     CloseHandle(process_handle)
-    
+
     print(f"[*] Found {len(regions)} memory regions")
-    
+
     if max_regions:
         regions = regions[:max_regions]
         print(f"[*] Limited to {len(regions)} regions")
-    
+
     # 计算总扫描大小
     total_size = sum(size for _, size in regions)
     print(f"[*] Total memory to scan: {total_size / 1024 / 1024:.2f} MB")
-    
+
     # 准备任务列表
     tasks = [(pid, addr, size, buf, internal_db_key) for addr, size in regions]
-    
+
     # 使用多进程扫描
     worker_count = max(1, multiprocessing.cpu_count() // 2)
     print(f"[*] Starting brute force search with {worker_count} workers...")
-    
+
     found_keys = []
-    
+
     with multiprocessing.Pool(processes=worker_count) as pool:
         for i, result in enumerate(pool.imap_unordered(scan_memory_region_for_keys, tasks)):
             if result:
@@ -262,15 +262,15 @@ def brute_force_search_key(pid, db_path, internal_db_key=None, max_regions=None)
                 if finish_flag:
                     pool.terminate()
                     break
-            
+
             # 显示进度
             if (i + 1) % 100 == 0:
                 print(f"[*] Scanned {i + 1}/{len(tasks)} regions...")
-    
+
     if found_keys:
         key = found_keys[0]
         return key.hex()
-    
+
     print("[-] Brute force search completed, no valid key found")
     return None
 
@@ -278,9 +278,9 @@ def brute_force_search_key(pid, db_path, internal_db_key=None, max_regions=None)
 def main():
     """命令行入口"""
     freeze_support()
-    
+
     import psutil
-    
+
     # 查找微信进程
     print("[*] Looking for WeChat process...")
     pid = None
@@ -293,23 +293,23 @@ def main():
                 break
         except:
             pass
-    
+
     if not pid:
         print("[-] WeChat process not found")
         return 1
-    
+
     # 获取数据库路径
     print("[*] Enter database file path for verification")
     db_path = input("    Path: ").strip()
-    
+
     if not db_path or not os.path.exists(db_path):
         print("[-] Invalid database path")
         return 1
-    
+
     # 获取 internal_db_key（可选）
     print("[*] Enter internal_db_key (64 hex chars, optional):")
     internal_key_hex = input("    Key: ").strip()
-    
+
     internal_db_key = None
     if internal_key_hex:
         try:
@@ -318,11 +318,11 @@ def main():
         except:
             print("[-] Invalid internal_db_key format")
             return 1
-    
+
     # 执行暴力搜索
     print("\n[*] Starting brute force memory search...")
     key = brute_force_search_key(pid, db_path, internal_db_key)
-    
+
     if key:
         print(f"\n[+] SUCCESS! Found key: {key}")
         return 0

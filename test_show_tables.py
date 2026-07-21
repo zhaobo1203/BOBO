@@ -61,7 +61,7 @@ for table in tables:
     columns = cursor.fetchall()
     for col in columns:
         print(f"  {col[1]}: {col[2]}")
-    
+
     # 显示一行数据
     try:
         cursor.execute(f"SELECT * FROM {table_name} LIMIT 1")

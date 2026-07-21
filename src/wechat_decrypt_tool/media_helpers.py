@@ -3020,6 +3020,7 @@ def _detect_wechat_dat_version(data: bytes) -> int:
         return 2
     return 0
 
+
 @lru_cache(maxsize=4096)
 def _fallback_search_media_by_file_id(
     weixin_root_str: str,

@@ -543,6 +543,7 @@ def scan_account_databases_from_path(db_storage_path: str) -> dict:
         "detected_accounts": detected_accounts,
     }
 
+
 def setup_logging():
     """设置日志配置 - 已弃用，使用统一的日志配置"""
     from .logging_config import setup_logging as unified_setup_logging
@@ -557,7 +558,6 @@ def setup_logging():
     return log_dir
 
 
-
 class WeChatDatabaseDecryptor:
     """微信4.x数据库解密器"""
 
@@ -569,13 +569,13 @@ class WeChatDatabaseDecryptor:
         """
         if len(key_hex) != 64:
             raise ValueError("密钥必须是64位十六进制字符串")
-        
+
         try:
             self.key_bytes = bytes.fromhex(key_hex)
         except ValueError:
             raise ValueError("密钥必须是有效的十六进制字符串")
         self.last_result: dict = {}
-    
+
     def decrypt_database(self, db_path: str, output_path: str) -> bool:
         """解密微信4.x版本数据库
 
@@ -710,7 +710,7 @@ class WeChatDatabaseDecryptor:
             return bool(result["success"])
 
         logger.info(f"开始解密数据库: {db_path}")
-        
+
         try:
             source_snapshot_before = _safe_file_snapshot(db_path)
             result["source_snapshot_before"] = source_snapshot_before
@@ -799,7 +799,7 @@ class WeChatDatabaseDecryptor:
                     f.write(encrypted_data)
                 result["copied_as_sqlite"] = True
                 return _finalize(True)
-            
+
             page1 = encrypted_data[:PAGE_SIZE]
             resolved_key_material = _resolve_page1_key_material(self.key_bytes, page1)
             if resolved_key_material is None:
@@ -966,6 +966,7 @@ class WeChatDatabaseDecryptor:
         except Exception as e:
             logger.error(f"解密失败: {db_path}, 错误: {e}")
             return _finalize(False, str(e))
+
 
 def decrypt_wechat_databases(db_storage_path: str = None, key: str = None) -> dict:
     """
@@ -1237,6 +1238,7 @@ def main():
     else:
         print(f"解密完成: {result['message']}")
         print(f"输出目录: {result['output_directory']}")
+
 
 if __name__ == "__main__":
     main()
