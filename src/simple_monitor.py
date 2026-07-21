@@ -351,32 +351,46 @@ class SimpleMonitor:
         print(f"  尝试 WCDB 连接...", flush=True)
         logger.info(f"[步骤4] 尝试WCDB实时连接")
         
-        from wechat_decrypt_tool.wcdb_realtime import open_account, WCDBRealtimeError
-        import concurrent.futures
-        
-        def _connect():
-            return open_account(session_db_path, self.db_key, timeout=10.0)
-        
         try:
-            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-                future = executor.submit(_connect)
-                try:
-                    self.handle = future.result(timeout=15)
-                except concurrent.futures.TimeoutError:
-                    logger.warning(f"[步骤4] WCDB连接超时(15秒)")
-                    self.handle = None
-                    print(f"  WCDB 连接超时", flush=True)
+            from wechat_decrypt_tool.wcdb_realtime import open_account, WCDBRealtimeError
             
-            if self.handle and self.handle > 0:
-                logger.info(f"[步骤4] WCDB连接成功，handle={self.handle}")
-                print(f"  WCDB 连接成功", flush=True)
+            def _connect_wcdb():
+                return open_account(session_db_path, self.db_key, timeout=8.0)
+            
+            # 使用较短的超时时间，避免长时间等待
+            import threading
+            result = [None]
+            exception = [None]
+            
+            def _worker():
+                try:
+                    result[0] = open_account(session_db_path, self.db_key, timeout=8.0)
+                except Exception as e:
+                    exception[0] = e
+            
+            thread = threading.Thread(target=_worker, daemon=True)
+            thread.start()
+            thread.join(timeout=10.0)  # 最多等待10秒
+            
+            if thread.is_alive():
+                # 超时，WCDB 连接未完成
+                logger.warning(f"[步骤4] WCDB连接超时(10秒)，使用静态模式")
+                self.handle = None
+                print(f"  WCDB 连接超时，将使用静态模式", flush=True)
+            elif exception[0]:
+                # 连接出错
+                logger.warning(f"[步骤4] WCDB连接失败: {exception[0]}")
+                self.handle = None
+                print(f"  WCDB 连接失败: {exception[0]}", flush=True)
             else:
-                logger.info(f"[步骤4] WCDB连接失败")
-                print(f"  WCDB 连接失败", flush=True)
-        except WCDBRealtimeError as e:
-            logger.warning(f"[步骤4] WCDB连接失败: {e}")
-            self.handle = None
-            print(f"  WCDB 连接失败: {e}", flush=True)
+                self.handle = result[0]
+                if self.handle and self.handle > 0:
+                    logger.info(f"[步骤4] WCDB连接成功，handle={self.handle}")
+                    print(f"  WCDB 连接成功", flush=True)
+                else:
+                    logger.info(f"[步骤4] WCDB连接返回无效句柄")
+                    self.handle = None
+                    print(f"  WCDB 连接失败", flush=True)
         except Exception as e:
             logger.warning(f"[步骤4] WCDB连接异常: {e}")
             self.handle = None
@@ -1136,182 +1150,165 @@ class SimpleMonitor:
     def _get_messages_static(self, group_id: str, limit: int = 30) -> list:
         """使用静态解密方式获取消息
         
-        消息存储在 message/*.db 文件中，每个会话有单独的 Msg_xxx 表
-        需要通过 Name2Id 映射找到群ID对应的表名
+        消息存储在 message/*.db 文件的 Msg_<MD5(group_id)> 表中
+        参考 chat_realtime_reader.py 的实现
         """
         import sqlite3
         import hashlib
         from wechat_decrypt_tool.wechat_decrypt import WeChatDatabaseDecryptor
+        from wechat_decrypt_tool.constants import ZSTD_MAGIC
         
-        logger = logging.getLogger(__name__)
         logger.info(f"[消息查询] 开始查询群聊消息, group_id={group_id}, limit={limit}")
         
-        # 查找 message 目录
-        # session.db 路径: .../db_storage/session/session.db
-        # message 目录路径: .../db_storage/message
-        session_db_path = self._find_session_db()
-        if not session_db_path:
-            logger.warning(f"[消息查询] session.db 路径未找到")
+        if not self.db_key or not self.temp_dir:
+            logger.warning("[消息查询] 密钥或临时目录未初始化")
             return []
         
-        # 获取 db_storage 目录（向上两级）
+        # 计算消息表名: Msg_<MD5(group_id)>
+        expected_table = f"Msg_{hashlib.md5(group_id.encode('utf-8')).hexdigest()}"
+        logger.debug(f"[消息查询] 期望表名: {expected_table}")
+        
+        # 查找 message 目录
+        session_db_path = self._find_session_db()
+        if not session_db_path:
+            logger.warning("[消息查询] session.db 路径未找到")
+            return []
+        
+        # 获取 db_storage 目录
         db_storage_dir = os.path.dirname(os.path.dirname(session_db_path))
         message_dir = os.path.join(db_storage_dir, "message")
-        
-        logger.info(f"[消息查询] session.db: {session_db_path}")
-        logger.info(f"[消息查询] db_storage: {db_storage_dir}")
-        logger.info(f"[消息查询] message目录: {message_dir}")
         
         if not os.path.exists(message_dir):
             logger.warning(f"[消息查询] 消息目录不存在: {message_dir}")
             return []
         
-        # 计算 group_id 的 MD5 值（用于匹配表名）
-        group_id_hash = hashlib.md5(group_id.encode()).hexdigest()
-        logger.info(f"[消息查询] group_id MD5: {group_id_hash}")
+        # 获取所有消息数据库文件
+        message_dbs = []
+        for f in os.listdir(message_dir):
+            if f.endswith(".db") and not f.endswith("-shm") and not f.endswith("-wal"):
+                if "message" in f.lower():
+                    message_dbs.append(f)
+        
+        # 排序：普通消息优先，biz 次之
+        message_dbs.sort(key=lambda x: (0 if x.startswith("message_") else 1, x))
+        
+        logger.debug(f"[消息查询] 找到 {len(message_dbs)} 个消息数据库")
         
         decryptor = WeChatDatabaseDecryptor(self.db_key)
         messages = []
         
-        # 检查所有消息数据库文件
-        # 包括: biz_message_*.db, MSG*.db, message_*.db 等
-        all_db_files = [f for f in os.listdir(message_dir) if f.endswith(".db") and not f.endswith("-shm") and not f.endswith("-wal")]
-        
-        # 优先检查 biz_message_*.db
-        message_dbs = [f for f in all_db_files if f.startswith("biz_message_")]
-        # 也检查 MSG*.db
-        message_dbs.extend([f for f in all_db_files if f.startswith("MSG")])
-        # 检查 message_*.db
-        message_dbs.extend([f for f in all_db_files if f.startswith("message_") and not f.startswith("biz_")])
-        
-        logger.info(f"[消息查询] 找到 {len(message_dbs)} 个消息数据库: {message_dbs[:5]}...")
-        print(f"  [DEBUG] 找到 {len(message_dbs)} 个消息数据库", flush=True)
-        
-        for msg_db_name in message_dbs:
-            msg_db_path = os.path.join(message_dir, msg_db_name)
-            temp_db = os.path.join(self.temp_dir, f"temp_{msg_db_name}")
+        # 遍历数据库查找目标表
+        for db_name in message_dbs[:5]:  # 只检查前5个数据库
+            db_path = os.path.join(message_dir, db_name)
+            temp_db = os.path.join(self.temp_dir, f"temp_{db_name}")
             
             try:
                 # 解密数据库
-                if not decryptor.decrypt_database(msg_db_path, temp_db):
+                if not decryptor.decrypt_database(db_path, temp_db):
                     continue
                 
                 conn = sqlite3.connect(temp_db)
                 conn.row_factory = sqlite3.Row
                 cursor = conn.cursor()
                 
-                # 查找 Name2Id 表中的映射
-                cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='Name2Id'")
-                if cursor.fetchone():
-                    cursor.execute("SELECT * FROM Name2Id")
-                    name2id_rows = cursor.fetchall()
-                    for row in name2id_rows:
-                        # Name2Id 格式: name (群ID hash) -> id (表名后缀)
-                        name_val = row[0] if row else ''
-                        id_val = row[1] if len(row) > 1 else ''
-                        if name_val and id_val:
-                            # 尝试匹配群ID
-                            if group_id_hash in name_val or group_id in name_val:
-                                logger.info(f"[消息查询] 在 {msg_db_name} 中找到映射: {name_val} -> {id_val}")
+                # 查找目标表（大小写不敏感）
+                cursor.execute("""
+                    SELECT name FROM sqlite_master 
+                    WHERE type='table' AND lower(name)=lower(?)
+                    LIMIT 1
+                """, (expected_table,))
                 
-                # 查找 Msg_ 表
-                cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'Msg_%'")
-                msg_tables = [row[0] for row in cursor.fetchall()]
+                row = cursor.fetchone()
+                if not row:
+                    conn.close()
+                    continue
                 
-                # 遍历每个 Msg 表，查找包含群消息的表
-                for table_name in msg_tables:
+                actual_table = row[0]
+                logger.debug(f"[消息查询] 在 {db_name} 中找到表: {actual_table}")
+                
+                # 检查表字段
+                cursor.execute(f"PRAGMA table_info({actual_table})")
+                columns = [col[1] for col in cursor.fetchall()]
+                
+                # 查询消息
+                # 根据字段选择查询语句
+                if 'compress_content' in columns:
+                    cursor.execute(f"""
+                        SELECT local_id, create_time, message_content, compress_content, real_sender_id
+                        FROM {actual_table}
+                        ORDER BY create_time DESC
+                        LIMIT ?
+                    """, (limit,))
+                else:
+                    cursor.execute(f"""
+                        SELECT local_id, create_time, message_content, real_sender_id
+                        FROM {actual_table}
+                        ORDER BY create_time DESC
+                        LIMIT ?
+                    """, (limit,))
+                
+                rows = cursor.fetchall()
+                logger.debug(f"[消息查询] 查询到 {len(rows)} 条消息")
+                
+                for row in rows:
                     try:
-                        # 检查表字段
-                        cursor.execute(f"PRAGMA table_info({table_name})")
-                        columns = [col[1] for col in cursor.fetchall()]
+                        # 解码消息内容
+                        content = row['message_content']
+                        compress = row['compress_content'] if 'compress_content' in row.keys() else None
                         
-                        # 消息表应该有这些字段
-                        if 'message_content' not in columns or 'create_time' not in columns:
-                            continue
+                        # 优先使用 compress_content
+                        if compress and isinstance(compress, bytes):
+                            try:
+                                if compress.startswith(ZSTD_MAGIC):
+                                    import zstandard as zstd
+                                    decompressor = zstd.ZstdDecompressor()
+                                    content = decompressor.decompress(compress).decode('utf-8')
+                                else:
+                                    content = compress.decode('utf-8', errors='replace')
+                            except Exception:
+                                pass
+                        elif isinstance(content, bytes):
+                            try:
+                                if content.startswith(ZSTD_MAGIC):
+                                    import zstandard as zstd
+                                    decompressor = zstd.ZstdDecompressor()
+                                    content = decompressor.decompress(content).decode('utf-8')
+                                else:
+                                    content = content.decode('utf-8', errors='replace')
+                            except Exception:
+                                content = str(content)
                         
-                        # 尝试查询消息 - 使用 source 字段过滤
-                        if 'source' in columns:
-                            # source 字段包含发送者信息，可能包含群ID
-                            cursor.execute(f"""
-                                SELECT local_id, create_time, message_content, real_sender_id, source
-                                FROM {table_name}
-                                WHERE source LIKE ?
-                                ORDER BY create_time DESC
-                                LIMIT ?
-                            """, (f'%{group_id}%', limit))
-                        else:
-                            # 没有过滤条件，获取最新消息
-                            cursor.execute(f"""
-                                SELECT local_id, create_time, message_content, real_sender_id
-                                FROM {table_name}
-                                ORDER BY create_time DESC
-                                LIMIT ?
-                            """, (limit,))
+                        # 获取发送者
+                        sender_wxid = row['real_sender_id'] if row['real_sender_id'] else '未知'
                         
-                        rows = cursor.fetchall()
-                        if rows:
-                            logger.info(f"[消息查询] 在 {table_name} 中找到 {len(rows)} 条消息")
-                            
-                            for row in rows:
-                                try:
-                                    content = row['message_content']
-                                    # 处理 zstd 压缩
-                                    if isinstance(content, bytes):
-                                        try:
-                                            import zstandard as zstd
-                                            ZSTD_MAGIC = b"\x28\xb5\x2f\xfd"
-                                            if content.startswith(ZSTD_MAGIC):
-                                                decompressor = zstd.ZstdDecompressor()
-                                                content = decompressor.decompress(content).decode('utf-8')
-                                            else:
-                                                content = content.decode('utf-8', errors='replace')
-                                        except Exception:
-                                            content = str(content)
-                                    
-                                    # 解析 source 获取发送者信息
-                                    sender = '未知'
-                                    source = row['source'] if 'source' in row.keys() else ''
-                                    if source:
-                                        try:
-                                            # source 格式可能是 XML，尝试提取发送者
-                                            if '<senderusername>' in source.lower():
-                                                import re
-                                                match = re.search(r'<senderusername>([^<]+)</senderusername>', source, re.I)
-                                                if match:
-                                                    sender = match.group(1)
-                                        except Exception:
-                                            pass
-                                    
-                                    messages.append({
-                                        'local_id': row['local_id'],
-                                        'create_time': row['create_time'] or 0,
-                                        'message_content': content or '',
-                                        'sender_username': sender
-                                    })
-                                except Exception as e:
-                                    logger.warning(f"[消息查询] 解析消息失败: {e}")
-                                    continue
+                        messages.append({
+                            'local_id': row['local_id'],
+                            'create_time': row['create_time'] or 0,
+                            'message_content': content or '',
+                            'sender_username': sender_wxid
+                        })
                     except Exception as e:
-                        logger.debug(f"[消息查询] 查询表 {table_name} 失败: {e}")
+                        logger.warning(f"[消息查询] 解析消息失败: {e}")
                         continue
                 
                 conn.close()
                 
+                # 找到消息后就退出
+                if messages:
+                    break
+                    
+            except Exception as e:
+                logger.warning(f"[消息查询] 处理 {db_name} 失败: {e}")
+                continue
+            finally:
                 # 清理临时文件
                 try:
-                    os.remove(temp_db)
+                    if os.path.exists(temp_db):
+                        os.remove(temp_db)
                 except Exception:
                     pass
-                
-            except Exception as e:
-                logger.debug(f"[消息查询] 处理 {msg_db_name} 失败: {e}")
-                continue
         
-        # 按时间排序并限制数量
-        messages.sort(key=lambda x: x.get('create_time', 0), reverse=True)
-        logger.info(f"[消息查询] 总共找到 {len(messages)} 条消息")
-        
-        return messages[:limit]
+        return messages
     
     def run(self):
         """运行主流程"""

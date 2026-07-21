@@ -2,7 +2,7 @@
 
 专为打包后的EXE设计的日志系统。
 - 日志存放在EXE同级的 logs/ 目录
-- 按日期分割日志文件 (如 2026-07-20.log)
+- 每次启动创建独立的日志文件（包含时间戳）
 - 支持控制台彩色输出
 - 支持环境变量控制日志级别
 """
@@ -60,13 +60,19 @@ def get_log_dir() -> Path:
 
 
 def get_log_file() -> Path:
-    """获取当前日志文件路径（按日期命名）"""
-    today = datetime.now().strftime('%Y-%m-%d')
-    return get_log_dir() / f'{today}.log'
+    """获取当前日志文件路径（包含时间戳，每次启动独立）"""
+    # 使用进程ID和时间戳确保每次启动有独立的日志文件
+    timestamp = datetime.now().strftime('%Y-%m-%d_%H%M%S')
+    pid = os.getpid()
+    return get_log_dir() / f'monitor_{timestamp}_pid{pid}.log'
 
 
 class ExeLoggerManager:
-    """EXE日志管理器（单例）"""
+    """EXE日志管理器（单例）
+    
+    日志文件命名规则: monitor_YYYY-MM-DD_HHMMSS_pid<进程ID>.log
+    每次程序启动都会创建新的日志文件，避免日志混乱。
+    """
     
     _instance: Optional['ExeLoggerManager'] = None
     _initialized: bool = False
@@ -76,7 +82,7 @@ class ExeLoggerManager:
             cls._instance = super().__new__(cls)
         return cls._instance
     
-    def setup(self, log_level: str = 'DEBUG') -> Path:
+    def setup(self, log_level: str = 'INFO') -> Path:
         """设置日志系统
         
         Args:
@@ -92,15 +98,12 @@ class ExeLoggerManager:
         
         level = getattr(logging, log_level.upper(), logging.INFO)
         
-        # 获取日志文件路径
+        # 获取日志文件路径（每次启动创建新文件）
         log_file = get_log_file()
         
-        # 如果已初始化且配置相同，直接返回
+        # 如果已初始化，直接返回
         if self._initialized:
-            current_file = getattr(self, '_log_file', None)
-            current_level = getattr(self, '_log_level', None)
-            if current_file == log_file and current_level == level:
-                return log_file
+            return getattr(self, '_log_file', log_file)
         
         # 清除现有处理器
         root_logger = logging.getLogger()
@@ -126,7 +129,7 @@ class ExeLoggerManager:
         file_handler.setFormatter(file_format)
         file_handler.setLevel(level)
         
-        # 控制台处理器（仅在调试模式启用，EXE模式默认禁用）
+        # 控制台处理器（仅在调试模式启用）
         console_handler = None
         if os.environ.get('WECHAT_DEBUG') == '1':
             console_handler = logging.StreamHandler(sys.stdout)
@@ -145,6 +148,9 @@ class ExeLoggerManager:
         logger.info('微信群消息监听系统启动')
         logger.info(f'日志文件: {log_file}')
         logger.info(f'日志级别: {log_level}')
+        logger.info(f'进程ID: {os.getpid()}')
+        if getattr(sys, 'frozen', False):
+            logger.info(f'EXE路径: {sys.executable}')
         logger.info('=' * 50)
         
         # 保存状态
