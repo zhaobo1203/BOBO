@@ -23,8 +23,8 @@ class WeChatHookInjector:
     # 微信进程名称
     WECHAT_PROCESS_NAMES = ['Weixin.exe', 'WeChat.exe']
 
-    # 密钥特征码 (V4版本)
-    KEY_PATTERN_V4 = b'\x48\x8B\x......'  # 简化示意
+    # 密钥特征码 (V4版本) - 需要根据实际微信版本更新
+    KEY_PATTERN_V4 = b''  # Placeholder, actual pattern TBD
 
     def __init__(self, verbose: bool = True):
         self.verbose = verbose
@@ -71,6 +71,12 @@ class WeChatHookInjector:
 
             # 保存 PID
             self._detected_pid = pid
+            
+            # 确保 running 标志为 True（监听线程需要）
+            self._running = True
+            
+            # 保存进程对象
+            self._pm = pm
 
             # 启动密钥监听线程
             self._start_key_listener(pm)
@@ -80,38 +86,156 @@ class WeChatHookInjector:
         except Exception as e:
             self._log(f"注入失败: {e}")
             return False
+    
+    def start_and_hook(self, wechat_exe: str) -> bool:
+        """
+        启动微信并注入 Hook（参考 simple_monitor.py 的流程）
+        
+        Args:
+            wechat_exe: 微信可执行文件路径
+            
+        Returns:
+            是否成功启动并注入
+        """
+        import subprocess
+        import psutil
+        
+        try:
+            self._log(f"启动微信: {wechat_exe}")
+            
+            # 启动微信进程
+            process = subprocess.Popen([wechat_exe])
+            time.sleep(2)  # 等待微信初始化
+            
+            # 查找微信主进程
+            target_pid = None
+            for proc in psutil.process_iter(['pid', 'name', 'cmdline']):
+                try:
+                    name = proc.info.get('name', '')
+                    if name.lower() in ['weixin.exe', 'wechat.exe']:
+                        cmdline = proc.info.get('cmdline') or []
+                        cmdline_str = ' '.join(cmdline).lower()
+                        # 选择命令行最短的作为主进程
+                        if target_pid is None:
+                            target_pid = proc.info['pid']
+                        self._log(f"找到微信进程: PID={proc.info['pid']} name={name}")
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    continue
+            
+            if not target_pid:
+                target_pid = process.pid
+                self._log(f"使用启动进程 PID: {target_pid}")
+            
+            self._detected_pid = target_pid
+            self._running = True
+            
+            # 连接到微信进程
+            import pymem
+            pm = pymem.Pymem()
+            pm.open_process_from_id(target_pid)
+            self._pm = pm
+            
+            self._log(f"已连接到微信进程 PID={target_pid}")
+            
+            # 启动密钥监听线程
+            self._start_key_listener(pm)
+            
+            return True
+            
+        except Exception as e:
+            self._log(f"启动并注入失败: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
 
     def _start_key_listener(self, pm):
-        """启动密钥监听线程"""
+        """启动密钥监听线程 - 使用 wx_key Hook方式"""
 
         def listener():
             """密钥监听器"""
-            self._log("密钥监听已启动")
+            self._log("密钥监听已启动 (wx_key Hook模式)")
 
-            # 使用 key_v4 的内存扫描功能
             try:
-                from .key_v4 import recover_key, get_memory_regions, open_process
+                # 尝试导入 wx_key 模块
+                try:
+                    import wx_key
+                except ImportError:
+                    self._log("wx_key 模块未安装，无法使用Hook方式")
+                    self._log("请安装 wx_key 模块或使用 simple_monitor.py")
+                    return
 
-                # 获取内存区域
-                process_handle = open_process(pm.process_id)
-                regions = get_memory_regions(process_handle)
+                # 初始化 Hook
+                pid = pm.process_id
+                self._log(f"初始化 Hook (PID={pid})...")
+                
+                try:
+                    if not wx_key.initialize_hook(pid):
+                        err = wx_key.get_last_error_msg()
+                        self._log(f"Hook 初始化失败: {err}")
+                        return
+                except Exception as hook_err:
+                    self._log(f"Hook 初始化异常: {hook_err}")
+                    return
 
-                self._log(f"扫描 {len(regions)} 个内存区域...")
+                self._log("Hook 初始化成功，等待微信登录获取密钥...")
 
-                # 持续监听，直到获取密钥
-                max_attempts = 60  # 最多等待60次
-                attempt = 0
+                start_time = time.time()
+                timeout = 60.0  # 60秒超时
 
-                while self._running and attempt < max_attempts:
-                    # 尝试从内存中找密钥
-                    # 这里简化处理，实际需要配合数据库文件验证
-                    time.sleep(1)
-                    attempt += 1
+                try:
+                    while self._running and (time.time() - start_time) < timeout:
+                        # 轮询密钥数据
+                        try:
+                            key_data = wx_key.poll_key_data()
+                        except Exception as poll_err:
+                            self._log(f"poll_key_data 错误: {poll_err}")
+                            time.sleep(0.1)
+                            continue
+                        
+                        if key_data and 'key' in key_data:
+                            key = key_data['key']
+                            if key and len(str(key)) == 64:
+                                self._captured_key = str(key).lower()
+                                self._log(f"成功获取密钥: {self._captured_key[:16]}...")
+                                
+                                # 调用回调
+                                if self._key_callback:
+                                    self._key_callback(self._captured_key)
+                                break
+                        
+                        # 检查状态消息
+                        try:
+                            while True:
+                                msg, level = wx_key.get_status_message()
+                                if msg is None:
+                                    break
+                                if level == 2:  # 错误级别
+                                    self._log(f"[Hook Error] {msg}")
+                                elif level == 1:  # 警告级别
+                                    self._log(f"[Hook Warn] {msg}")
+                        except Exception:
+                            pass
+                        
+                        time.sleep(0.1)
+                    
+                    if not self._captured_key:
+                        elapsed = time.time() - start_time
+                        self._log(f"密钥获取超时 ({elapsed:.1f}秒)")
+                        self._log("提示：请在微信中完成登录（扫码或点击登录）")
+
+                finally:
+                    self._log("清理 Hook...")
+                    try:
+                        wx_key.cleanup_hook()
+                    except Exception:
+                        pass
 
                 self._log("密钥监听结束")
 
             except Exception as e:
                 self._log(f"监听异常: {e}")
+                import traceback
+                traceback.print_exc()
 
         thread = threading.Thread(target=listener, daemon=True)
         thread.start()

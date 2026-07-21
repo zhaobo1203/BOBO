@@ -236,17 +236,60 @@ def is_potential_key(key: bytes, strict: bool = True) -> bool:
 def get_key_inner(pid, process_infos):
     """扫描可能为key的内存，返回密钥候选列表"""
     process_handle = open_process(pid)
+    
+    # 多个备用 YARA 规则，针对不同微信版本
+    # 规则1: 原始规则（适用于较旧版本）
+    # 规则2: 新版本模式（更宽松的匹配）
+    # 规则3: V4 特征模式
     rules_v4_key = r'''
-        rule GetKeyAddrStub
+        rule GetKeyAddrStub_V1
         {
             strings:
                 $a = { ?? ?? ?? ?? ?? ?? 00 00 00 00 00 00 00 00 00 00 20 00 00 00 00 00 00 00 2f 00 00 00 00 00 00 00 }
             condition:
                 all of them
         }
+        
+        rule GetKeyAddrStub_V2
+        {
+            strings:
+                // 新版本模式：查找 32字节密钥指针区域
+                $a = { 00 00 00 00 00 00 00 00 20 00 00 00 00 00 00 00 }
+            condition:
+                all of them
+        }
+        
+        rule GetKeyAddrStub_V3
+        {
+            strings:
+                // 另一种常见模式
+                $a = { 20 00 00 00 00 00 00 00 [0-16] 00 00 00 00 00 00 00 }
+            condition:
+                all of them
+        }
+        
+        rule GetKeyAddrStub_V4
+        {
+            strings:
+                // 寻找可能的密钥存储结构
+                $a = { 20 00 00 00 00 00 00 00 2f }
+            condition:
+                all of them
+        }
+        
+        rule GetKeyAddrStub_V5
+        {
+            strings:
+                // 更宽松的模式
+                $a = { 00 00 00 00 20 00 00 00 00 00 00 00 [0-8] 00 00 00 00 }
+            condition:
+                all of them
+        }
         '''
+    
     rules = yara.compile(source=rules_v4_key)
     pre_addresses = []
+    rule_matches = {}  # 统计每个规则匹配次数
 
     for base_address, region_size in process_infos:
         memory = read_process_memory(process_handle, base_address, region_size)
@@ -257,18 +300,39 @@ def get_key_inner(pid, process_infos):
         if matches:
             for match in matches:
                 rule_name = match.rule
-                if rule_name == 'GetKeyAddrStub':
+                if rule_name.startswith('GetKeyAddrStub'):
+                    # 统计匹配
+                    rule_matches[rule_name] = rule_matches.get(rule_name, 0) + 1
+                    
                     for string in match.strings:
                         for instance in string.instances:
                             offset, content = instance.offset, instance.matched_data
-                            addr = read_num(memory, offset, 8)
-                            pre_addresses.append(addr)
+                            # 根据不同规则调整地址计算
+                            if 'V1' in rule_name or 'V2' in rule_name:
+                                addr = read_num(memory, offset, 8)
+                            elif 'V3' in rule_name:
+                                addr = read_num(memory, offset + 8, 8)
+                            elif 'V4' in rule_name:
+                                addr = read_num(memory, offset - 8, 8)
+                            elif 'V5' in rule_name:
+                                addr = read_num(memory, offset + 4, 8)
+                            else:
+                                addr = read_num(memory, offset, 8)
+                            
+                            if addr > 0x10000:  # 过滤无效地址
+                                pre_addresses.append(addr)
+
+    # 打印匹配统计
+    if rule_matches:
+        print(f"[*] YARA rule matches: {rule_matches}")
+    else:
+        print(f"[!] No YARA matches found")
 
     keys = []
     key_set = set()
     for pre_address in pre_addresses:
         key = read_bytes_from_pid(pid, pre_address, 32)
-        if key not in key_set:
+        if key and key not in key_set:
             keys.append(key)
             key_set.add(key)
 

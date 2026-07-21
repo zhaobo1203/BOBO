@@ -55,8 +55,22 @@ class KeyAcquisitionService:
             密钥字符串，不存在返回 None
         """
         store = load_account_keys_store()
+        
+        # 支持两种数据结构：
+        # 1. 新格式: {"wxid_xxx": {"db_key": "..."}}  (直接以账号ID为键)
+        # 2. 旧格式: {"accounts": {"wxid_xxx": {"db_key": "..."}}}  (accounts包装)
+        
+        # 先尝试新格式（直接以账号ID为键）
+        if account_id in store:
+            account_data = store[account_id]
+            if isinstance(account_data, dict):
+                key = account_data.get('db_key')
+                if key:
+                    self._log(f"[密钥] 从存储中找到密钥: {key[:16]}...")
+                    return key
+        
+        # 再尝试旧格式（accounts包装）
         accounts = store.get('accounts', {})
-
         if account_id in accounts:
             key = accounts[account_id].get('db_key')
             if key:

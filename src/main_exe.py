@@ -50,9 +50,9 @@ class WeChatMonitorApp:
         )
 
     def clear_screen(self):
-        """清屏 - 使用 ANSI 转义序列替代 os.system"""
-        # 使用 ANSI 转义序列清屏，避免 shell 注入风险
-        print('\033[2J\033[H', end='')
+        """清屏 - 兼容 Windows 终端"""
+        import os
+        os.system('cls' if os.name == 'nt' else 'clear')
 
     def print_banner(self):
         """显示Banner"""
@@ -165,8 +165,8 @@ class WeChatMonitorApp:
         logger.info("[TN-03] 获取数据库密钥...")
 
         # 使用新的密钥获取服务
-        success, key = self.key_service.get_stored_key(self.account_id)
-        if success and key:
+        key = self.key_service.get_stored_key(self.account_id)
+        if key:
             self.db_key = key
             logger.info("[TN-03] 使用已保存密钥")
             return True
@@ -224,7 +224,7 @@ class WeChatMonitorApp:
             return False
 
         try:
-            self.handle = open_account(session_db_path, self.db_key, self.account_id or '')
+            self.handle = open_account(session_db_path, self.db_key)
             if self.handle and self.handle > 0:
                 logger.info(f"[TN-05] WCDB连接成功, handle={self.handle}")
                 return True
@@ -240,18 +240,75 @@ class WeChatMonitorApp:
         if not self.data_path:
             return None
 
+        # 正确的路径顺序（按优先级）
         session_paths = [
-            Path(self.data_path) / 'db_storage' / 'session.db',
-            Path(self.data_path) / 'session.db',
+            Path(self.data_path) / 'db_storage' / 'session' / 'session.db',  # 标准路径
+            Path(self.data_path) / 'session' / 'session.db',  # 备用路径
+            Path(self.data_path) / 'db_storage' / 'session.db',  # 旧版路径
+            Path(self.data_path) / 'session.db',  # 最简路径
         ]
 
         for path in session_paths:
             if path.exists():
+                logger.debug(f"[TN-05] 找到session.db: {path}")
                 return str(path)
 
+        logger.warning(f"[TN-05] 未找到session.db，搜索路径: {self.data_path}")
         return None
 
     # ==================== 功能菜单 ====================
+
+    def _load_group_display_names(self):
+        """从 contact.db 加载群昵称映射（通过解密数据库）"""
+        if not self.data_path or not self.db_key:
+            return {}
+
+        try:
+            from wechat_core.message_monitor import get_group_names
+            return get_group_names(self.db_key, self.data_path)
+        except Exception as e:
+            logger.warning(f"加载群昵称失败: {e}")
+            return {}
+
+    def _load_contact_nicknames(self):
+        """从 contact.db 加载联系人昵称映射"""
+        if not self.data_path or not self.db_key:
+            return {}
+
+        try:
+            from wechat_core.db_decryptor import get_decrypted_connection, close_decrypted_connection
+            import os
+
+            contact_db = os.path.join(self.data_path, 'db_storage', 'contact', 'contact.db')
+            if not os.path.exists(contact_db):
+                return {}
+
+            conn = get_decrypted_connection(self.db_key, contact_db)
+            if not conn:
+                return {}
+
+            try:
+                cursor = conn.cursor()
+                cursor.execute("""
+                    SELECT username, remark, nick_name, alias
+                    FROM contact
+                """)
+
+                nicknames = {}
+                for row in cursor.fetchall():
+                    wxid = row['username']
+                    # 优先级: 备注 > 昵称 > 别名 > wxid
+                    name = row['remark'] or row['nick_name'] or row['alias'] or wxid
+                    nicknames[wxid] = name
+
+                return nicknames
+            except Exception:
+                return {}
+            finally:
+                close_decrypted_connection(conn)
+        except Exception as e:
+            logger.warning(f"加载联系人昵称失败: {e}")
+            return {}
 
     def menu_list_groups(self):
         """菜单: 查看群聊列表"""
@@ -273,8 +330,13 @@ class WeChatMonitorApp:
             if not self.groups:
                 print("  暂无群聊")
             else:
+                # 加载群昵称
+                group_names = self._load_group_display_names()
+
                 for i, group in enumerate(self.groups[:50], 1):
-                    name = group.get('displayName', '') or group.get('username', '')
+                    group_id = group.get('username', '')
+                    # 优先使用 contact.db 中的昵称
+                    name = group_names.get(group_id) or group.get('displayName', '') or group_id
                     print(f"  {i:3d}. {name[:40]}")
 
                 if len(self.groups) > 50:
@@ -305,14 +367,42 @@ class WeChatMonitorApp:
             self.pause()
             return
 
-        print("  请选择要监控的群聊:")
+        # 加载群昵称
+        group_names = self._load_group_display_names()
+
+        # 搜索群聊
+        print("  请输入群名称关键词（直接回车显示全部）:")
         print()
-        for i, group in enumerate(self.groups[:20], 1):
-            name = group.get('displayName', '') or group.get('username', '')
+        keyword = self.input_choice("关键词").strip().lower()
+
+        # 过滤匹配的群聊
+        if keyword:
+            matched_groups = []
+            for group in self.groups:
+                group_id = group.get('username', '')
+                # 优先使用 contact.db 中的昵称，其次使用 displayName
+                name = group_names.get(group_id) or group.get('displayName', '') or group_id
+                if keyword in name.lower() or keyword in group_id.lower():
+                    matched_groups.append(group)
+            
+            if not matched_groups:
+                print(f"\n  未找到包含 '{keyword}' 的群聊")
+                self.pause()
+                return
+            
+            print(f"\n  找到 {len(matched_groups)} 个匹配的群聊:")
+        else:
+            matched_groups = self.groups
+            print(f"\n  共 {len(matched_groups)} 个群聊:")
+
+        print()
+        for i, group in enumerate(matched_groups[:20], 1):
+            group_id = group.get('username', '')
+            name = group_names.get(group_id) or group.get('displayName', '') or group_id
             print(f"  {i:2d}. {name[:35]}")
 
-        if len(self.groups) > 20:
-            print(f"\n  ... 还有 {len(self.groups) - 20} 个群聊")
+        if len(matched_groups) > 20:
+            print(f"\n  ... 还有 {len(matched_groups) - 20} 个群聊")
 
         print()
         choice = self.input_choice("请输入群聊编号 (0返回)")
@@ -322,10 +412,10 @@ class WeChatMonitorApp:
 
         try:
             idx = int(choice) - 1
-            if 0 <= idx < len(self.groups):
-                target_group = self.groups[idx]
+            if 0 <= idx < len(matched_groups):
+                target_group = matched_groups[idx]
                 group_id = target_group.get('username', '')
-                group_name = target_group.get('displayName', '') or group_id
+                group_name = group_names.get(group_id) or target_group.get('displayName', '') or group_id
 
                 self._start_monitoring(group_id, group_name)
         except ValueError:
@@ -348,35 +438,134 @@ class WeChatMonitorApp:
         print()
 
         storage = get_message_storage()
-        last_time = 0
+        last_time = 0.0
         interval = POLL_INTERVAL_DEFAULT
+        # 已处理的消息ID集合（去重）
+        processed_msgs = set()
+        # 加载联系人昵称映射
+        contact_nicknames = self._load_contact_nicknames()
+
+        # 先获取并显示最近20条历史消息
+        try:
+            initial_messages = get_messages(self.handle, group_id, limit=50)
+            if initial_messages:
+                # 收集可显示的文字消息
+                text_messages = []
+                filtered_count = 0
+                
+                for msg in initial_messages:
+                    create_time = msg.get('create_time', 0)
+                    if isinstance(create_time, str):
+                        try:
+                            create_time = float(create_time)
+                        except ValueError:
+                            create_time = 0
+                    
+                    content = self._decode_message(msg.get('message_content', ''))
+                    if not self._is_text_message(content):
+                        filtered_count += 1
+                        continue
+                    
+                    sender_wxid = msg.get('sender_username', '未知')
+                    sender = contact_nicknames.get(sender_wxid, sender_wxid)
+                    send_time = datetime.fromtimestamp(create_time)
+                    
+                    text_messages.append({
+                        'create_time': create_time,
+                        'sender': sender,
+                        'content': content,
+                        'send_time': send_time,
+                        'sender_wxid': sender_wxid
+                    })
+                
+                # 按时间降序排序（新消息在上面）
+                text_messages.sort(key=lambda m: m['create_time'], reverse=True)
+                
+                # 显示消息
+                for msg in text_messages:
+                    send_time_str = msg['send_time'].strftime('%Y-%m-%d %H:%M:%S')
+                    print(f"  [{send_time_str}] {msg['sender']}: {msg['content'][:100]}")
+                    
+                    # 记录已处理的消息
+                    msg_key = f"{msg['create_time']}_{msg['sender_wxid']}"
+                    processed_msgs.add(msg_key)
+                
+                # 更新 last_time 为最新消息时间
+                if text_messages:
+                    last_time = text_messages[0]['create_time']
+                
+                if text_messages:
+                    print()  # 空行分隔历史消息和新消息
+                    print(f"  --- 以上{len(text_messages)}条历史消息，过滤{filtered_count}条非文字消息 ---")
+                    print()
+                else:
+                    print(f"  近期无文字消息（过滤{filtered_count}条非文字消息）")
+                    print()
+        except Exception as e:
+            logger.warning(f"获取历史消息失败: {e}")
 
         try:
             while self.running:
                 time.sleep(interval)
 
                 messages = get_messages(self.handle, group_id, limit=30)
-                new_messages = [m for m in messages if m.get('create_time', 0) > last_time]
+                # 确保 create_time 是数值类型，并去重
+                new_messages = []
+                for m in messages:
+                    create_time = m.get('create_time', 0)
+                    if isinstance(create_time, str):
+                        try:
+                            create_time = float(create_time)
+                        except ValueError:
+                            create_time = 0
+                    if create_time > last_time:
+                        # 使用时间戳+发送者作为唯一标识
+                        sender = m.get('sender_username', '')
+                        msg_key = f"{create_time}_{sender}"
+                        if msg_key not in processed_msgs:
+                            processed_msgs.add(msg_key)
+                            new_messages.append(m)
 
                 if new_messages:
                     interval = max(POLL_INTERVAL_MIN, interval * 0.8)
 
+                    # 按时间降序排序（新消息在前）
+                    new_messages.sort(key=lambda m: m.get('create_time', 0), reverse=True)
+
                     for msg in new_messages:
-                        last_time = msg.get('create_time', 0)
+                        # 确保 last_time 是数值类型
+                        create_time = msg.get('create_time', 0)
+                        if isinstance(create_time, str):
+                            try:
+                                create_time = float(create_time)
+                            except ValueError:
+                                create_time = 0
+                        last_time = create_time
                         content = self._decode_message(msg.get('message_content', ''))
-                        sender = msg.get('sender_username', '未知')
-                        send_time = datetime.fromtimestamp(last_time).strftime('%H:%M:%S')
-
-                        print(f"  [{send_time}] {sender}: {content[:80]}")
-
+                        
+                        # 过滤非文字消息
+                        if not self._is_text_message(content):
+                            continue
+                        
+                        sender_wxid = msg.get('sender_username', '未知')
+                        # 获取发送者昵称（优先使用备注/昵称）
+                        sender = contact_nicknames.get(sender_wxid, sender_wxid)
+                        # 时间格式增加年月日
+                        send_time = datetime.fromtimestamp(last_time)
+                        send_time_str = send_time.strftime('%Y-%m-%d %H:%M:%S')
+                        
+                        # 显示消息
+                        print(f"  [{send_time_str}] {sender}: {content[:100]}")
+                        
+                        # 保存到数据库
                         storage.save_message(
                             sender_nickname=sender,
                             message_content=content,
-                            send_time=datetime.fromtimestamp(last_time),
+                            send_time=send_time,
                             group_name=group_name,
-                            group_id=group_id
+                            group_id=group_id,
+                            sender_id=sender_wxid
                         )
-                else:
                     interval = min(POLL_INTERVAL_MAX, interval * 1.1)
 
         except KeyboardInterrupt:
@@ -387,19 +576,88 @@ class WeChatMonitorApp:
 
         self.pause()
 
+    def _is_text_message(self, content: str, debug: bool = False) -> bool:
+        """判断是否为可显示的文字消息（过滤纯非文字消息）"""
+        if not content or len(content.strip()) < 1:
+            return False
+
+        content = content.strip()
+
+        # 过滤超长内容（可能是加密数据或文件ID，正常消息不会这么长）
+        if len(content) > 2000:
+            if debug:
+                print(f"  [DEBUG] 过滤超长内容: {len(content)}字符")
+            return False
+
+        # 过滤看起来像加密数据的内容（纯十六进制长串）
+        import re
+        if re.match(r'^[a-f0-9]{32,}$', content):
+            if debug:
+                print(f"  [DEBUG] 过滤十六进制: {content[:20]}...")
+            return False
+
+        # 过滤纯表情符号消息（只有 [xxx] 格式，如 [捂脸][偷笑]）
+        # 但如果内容包含其他文字，则保留
+        if re.match(r'^(\[[^\]]+\])+$', content):
+            if debug:
+                print(f"  [DEBUG] 过滤纯表情: {content[:30]}")
+            return False
+
+        # 过滤 XML 格式消息（图片、视频、文件等媒体消息）
+        # 检查开头是否是XML
+        if content.startswith('<?xml') or content.startswith('<msg>') or content.startswith('<sysmsg'):
+            if debug:
+                print(f"  [DEBUG] 过滤XML消息: {content[:50]}...")
+            return False
+
+        # 检查是否包含常见非文字消息的XML标记
+        # 注意：要检查完整内容，不只是前100字符
+        media_markers = [
+            '<img ', '<img>', '<emoji', '<imghdr', '<videomsg', '<voicemsg',
+            '<location', '<appattach', '<appmsg', '<type>', '<datamsg',
+        ]
+        content_lower = content.lower()
+        for marker in media_markers:
+            if marker in content_lower:
+                if debug:
+                    print(f"  [DEBUG] 过滤媒体消息({marker}): {content[:50]}...")
+                return False
+
+        return True
+
     def _decode_message(self, raw_content):
         """解码消息内容"""
+        import zstandard as zstd
+        
+        if not raw_content:
+            return ''
+        
+        # 处理字符串类型的压缩数据
+        if isinstance(raw_content, str):
+            # 检查是否是十六进制编码的压缩数据（以 28b52ffd 开头）
+            if raw_content.startswith('28b52ffd') or raw_content.startswith('28B52FFD'):
+                try:
+                    # 将十六进制字符串转换为字节
+                    compressed_bytes = bytes.fromhex(raw_content)
+                    decompressor = zstd.ZstdDecompressor()
+                    return decompressor.decompress(compressed_bytes).decode('utf-8', errors='replace')
+                except Exception:
+                    return raw_content
+            # 普通字符串直接返回
+            return raw_content
+        
+        # 处理字节类型
         if isinstance(raw_content, bytes):
             if raw_content.startswith(ZSTD_MAGIC):
                 try:
-                    import zstandard as zstd
                     decompressor = zstd.ZstdDecompressor()
                     return decompressor.decompress(raw_content).decode('utf-8', errors='replace')
                 except Exception:
                     return raw_content.decode('utf-8', errors='replace')
             else:
                 return raw_content.decode('utf-8', errors='replace')
-        return str(raw_content or '')
+        
+        return str(raw_content)
 
     def menu_history(self):
         """菜单: 查看历史消息"""
