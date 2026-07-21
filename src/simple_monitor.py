@@ -414,6 +414,9 @@ class SimpleMonitor:
         self.use_static_mode = True
         self.static_mode_for_groups_only = True  # 静态解密仅用于获取群聊列表
         
+        # 加载昵称缓存（从 contact.db）
+        self._load_nickname_cache()
+        
         try:
             conn = sqlite3.connect(self.decrypted_session_db)
             cursor = conn.cursor()
@@ -423,6 +426,105 @@ class SimpleMonitor:
             return True
         except Exception:
             return False
+    
+    def _load_nickname_cache(self):
+        """从 contact.db 加载昵称缓存
+        
+        建立 wxid -> 昵称 的映射字典
+        """
+        import sqlite3
+        
+        self.nickname_cache = {}
+        
+        if not self.decrypted_contact_db or not os.path.exists(self.decrypted_contact_db):
+            logger.warning("[昵称缓存] contact.db 不存在，无法加载昵称")
+            return
+        
+        try:
+            conn = sqlite3.connect(self.decrypted_contact_db)
+            cursor = conn.cursor()
+            
+            # 查询所有联系人
+            cursor.execute("""
+                SELECT username, nick_name, remark
+                FROM contact
+            """)
+            
+            count = 0
+            for row in cursor.fetchall():
+                username, nick_name, remark = row
+                # 优先使用备注名，其次昵称
+                display_name = remark or nick_name or ''
+                if display_name and username:
+                    self.nickname_cache[username] = display_name
+                    count += 1
+            
+            conn.close()
+            logger.info(f"[昵称缓存] 已加载 {count} 个昵称映射")
+            print(f"  已加载 {count} 个联系人昵称")
+            
+        except Exception as e:
+            logger.warning(f"[昵称缓存] 加载失败: {e}")
+    
+    def _get_display_name(self, wxid: str) -> str:
+        """获取 wxid 对应的显示名称
+        
+        优先从缓存获取，找不到则返回原 wxid
+        """
+        if hasattr(self, 'nickname_cache') and self.nickname_cache:
+            return self.nickname_cache.get(wxid, wxid)
+        return wxid
+    
+    def _is_non_text_message(self, content: str) -> bool:
+        """判断是否为非纯文字消息（需要完全过滤的）
+        
+        过滤: 图片、网页链接、ZIP打包文件、视频、语音等
+        注意: 表情包标记会被清理，不会被过滤
+        """
+        if not content or not content.strip():
+            return True
+        
+        content_stripped = content.strip()
+        
+        # XML 格式消息（图片、链接、文件等）- 完全过滤
+        if content_stripped.startswith('<?xml') or content_stripped.startswith('<msg'):
+            return True
+        
+        # 检查是否包含图片标签（即使不是 XML 开头）
+        if '<img' in content_stripped.lower():
+            return True
+        
+        # 检查是否包含其他非文字标签
+        non_text_tags = ['<videomsg', '<voicemsg', '<appmsg', '<emoji', '<location']
+        for tag in non_text_tags:
+            if tag in content_stripped.lower():
+                return True
+        
+        return False
+    
+    def _clean_message_content(self, content: str) -> str:
+        """清理消息内容，去除表情包标记，保留文字
+        
+        例如: "[太阳]【国金计算机】..." -> "【国金计算机】..."
+        例如: "1 半导体...[太阳]晶圆厂..." -> "1 半导体...晶圆厂..."
+        """
+        if not content:
+            return ""
+        
+        import re
+        
+        # 去除所有位置的表情包标记（如 [太阳]、[红包] 等）
+        # 匹配 [...] 格式的表情包，包括前后有空格的情况
+        cleaned = re.sub(r'\s*\[[^\]]+\]\s*', ' ', content)
+        
+        # 清理多余的空格
+        cleaned = re.sub(r'\s+', ' ', cleaned).strip()
+        
+        # 如果清理后为空，返回原始内容
+        if not cleaned.strip():
+            return content.strip()
+        
+        return cleaned.strip()
     
     def _find_contact_db(self) -> str | None:
         """查找contact.db路径"""
@@ -787,7 +889,11 @@ class SimpleMonitor:
                 return None
     
     def decode_message(self, raw_content):
-        """解码消息内容"""
+        """解码消息内容（处理 zstd 压缩和 hex 字符串）"""
+        if raw_content is None:
+            return ""
+        
+        # 处理 bytes 类型
         if isinstance(raw_content, bytes):
             if raw_content.startswith(ZSTD_MAGIC):
                 try:
@@ -795,10 +901,25 @@ class SimpleMonitor:
                     decompressor = zstd.ZstdDecompressor()
                     return decompressor.decompress(raw_content).decode('utf-8', errors='replace')
                 except Exception:
-                    return raw_content.decode('utf-8', errors='replace')
-            else:
-                return raw_content.decode('utf-8', errors='replace')
-        return str(raw_content or '')
+                    pass
+            return raw_content.decode('utf-8', errors='replace')
+        
+        # 处理字符串类型
+        text = str(raw_content).strip()
+        
+        # 检查是否为 hex 字符串（以 "28b52ffd" 开头的 zstd 压缩数据）
+        if len(text) >= 16 and len(text) % 2 == 0:
+            try:
+                raw = bytes.fromhex(text)
+                if raw.startswith(ZSTD_MAGIC):
+                    import zstandard as zstd
+                    decompressor = zstd.ZstdDecompressor()
+                    decompressed = decompressor.decompress(raw)
+                    return decompressed.decode('utf-8', errors='replace')
+            except Exception:
+                pass
+        
+        return text
     
     def start_monitoring(self, target_group):
         """开始监控（参考 monitor_group.py 优化版）"""
@@ -852,8 +973,8 @@ class SimpleMonitor:
             print(f"  最近 {min(5, len(messages))} 条历史消息:")
             print()
             
-            # 按时间正序显示（消息列表是倒序的）
-            display_msgs = messages[:5][::-1]
+            # 按时间降序显示（最新消息在上）
+            display_msgs = messages[:5]
             for msg in display_msgs:
                 msg_time = msg.get('create_time') or msg.get('createTime') or 0
                 try:
@@ -861,20 +982,26 @@ class SimpleMonitor:
                 except:
                     msg_time_int = 0
                     
-                # 获取发送者
-                sender = msg.get('sender_username') or msg.get('sender') or '未知'
+                # 获取发送者（使用昵称缓存）
+                sender_wxid = msg.get('sender_username') or msg.get('sender') or '未知'
+                sender = self._get_display_name(sender_wxid)
                 
                 # 解码消息内容
                 raw_content = msg.get('message_content') or msg.get('content') or ''
                 content = self.decode_message(raw_content)
                 
-                # 过滤非文字消息
-                if content.strip().startswith('<?xml') or content.strip().startswith('<msg>'):
-                    content = '(非文本消息)'
-                elif len(content.strip()) < 1:
-                    content = '(空消息)'
-                else:
-                    content = content[:80] if len(content) > 80 else content
+                # 过滤非纯文字消息（图片、链接等）
+                if self._is_non_text_message(content):
+                    continue  # 跳过非纯文字消息
+                
+                # 清理表情包标记，保留文字
+                content = self._clean_message_content(content)
+                
+                if len(content.strip()) < 1:
+                    continue  # 跳过空消息
+                
+                # 显示完整消息内容（不截断）
+                content = content[:200] if len(content) > 200 else content
                 
                 time_str = datetime.fromtimestamp(msg_time_int).strftime('%H:%M:%S') if msg_time_int else "--:--:--"
                 print(f"    [{time_str}] {sender}: {content}")
@@ -946,11 +1073,12 @@ class SimpleMonitor:
                     # 自适应：有新消息时，加快轮询
                     current_interval = max(POLL_INTERVAL_MIN, current_interval * 0.5)
                     
-                    # 输出所有新消息
+                    # 输出所有新消息（降序排列，最新在上）
                     time_str = datetime.fromtimestamp(max_time_in_batch).strftime('%Y-%m-%d %H:%M:%S')
                     print(f"\n[新消息] {time_str}", flush=True)
                     
-                    for msg in new_messages:
+                    # 反转消息列表，使最新消息在上
+                    for msg in reversed(new_messages):
                         msg_time = msg.get('create_time') or msg.get('createTime') or 0
                         try:
                             msg_time_int = int(msg_time) if msg_time else 0
@@ -959,17 +1087,24 @@ class SimpleMonitor:
                         
                         # 只输出时间戳大于旧记录的消息
                         if msg_time_int > old_last_time:
-                            sender = msg.get('sender_username') or msg.get('sender') or '未知'
+                            # 获取发送者（使用昵称缓存）
+                            sender_wxid = msg.get('sender_username') or msg.get('sender') or '未知'
+                            sender = self._get_display_name(sender_wxid)
                             content = self.decode_message(msg.get('message_content') or msg.get('content') or '')
                             
-                            # 过滤非文字消息
-                            if content.strip().startswith('<?xml') or content.strip().startswith('<msg>'):
+                            # 过滤非纯文字消息
+                            if self._is_non_text_message(content):
                                 continue
+                            
+                            # 清理表情包标记，保留文字
+                            content = self._clean_message_content(content)
+                            
                             if len(content.strip()) < 1:
                                 continue
                             
                             time_str = datetime.fromtimestamp(msg_time_int).strftime('%H:%M:%S')
-                            content_preview = content[:100] if content else '(非文本消息)'
+                            # 显示完整消息内容（不截断）
+                            content_preview = content[:200] if len(content) > 200 else content
                             print(f"  [{time_str}] {sender}: {content_preview}", flush=True)
                             
                             # 保存到数据库
@@ -980,7 +1115,7 @@ class SimpleMonitor:
                                     send_time=datetime.fromtimestamp(msg_time_int),
                                     group_name=group_name,
                                     group_id=group_id,
-                                    sender_id=sender
+                                    sender_id=sender_wxid
                                 )
                                 saved_count += 1
                             except Exception as e:
