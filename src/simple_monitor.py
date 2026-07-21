@@ -906,11 +906,14 @@ class SimpleMonitor:
                 
                 # 获取最新消息
                 try:
-                    if getattr(self, 'use_static_mode', False):
-                        new_messages = self._get_messages_static(group_id, limit=10)
-                    else:
+                    # 优先使用 WCDB 实时方式
+                    if self.handle and self.handle > 0:
                         from wechat_decrypt_tool.wcdb_realtime import get_messages
                         new_messages = get_messages(self.handle, group_id, limit=10)
+                    elif getattr(self, 'use_static_mode', False):
+                        new_messages = self._get_messages_static(group_id, limit=10)
+                    else:
+                        new_messages = []
                 except Exception as e:
                     logger.warning(f"[监控] 获取消息失败: {e}")
                     continue
