@@ -985,7 +985,8 @@ def detect_wechat_installation(data_root_path: str | None = None) -> Dict[str, A
 
 def detect_current_logged_in_account(base_path: str = None) -> Dict[str, Any]:
     """
-    通过 global_config 解析 或 key_info.db 时间检测当前登录的微信账号
+    通过 key_info.db 修改时间检测当前登录的微信账号
+    优先级: key_info.db 修改时间 > global_config
     """
     # print(f"[DEBUG] 开始检测当前登录账号，提供的base_path: {base_path}")
 
@@ -995,19 +996,7 @@ def detect_current_logged_in_account(base_path: str = None) -> Dict[str, Any]:
             return {"current_account": None, "message": "未检测到微信数据目录"}
         base_path = detected_dirs[0]
 
-    # 1. 新特性：优先尝试从 global_config 解析完整用户信息
-    parsed_config = parse_global_config(base_path)
-    if parsed_config and parsed_config.get('wxid'):
-        print(f"[DEBUG] 从 global_config 成功解析出账号: {parsed_config['wxid']}")
-        return {
-            "current_account": parsed_config["wxid"],  # 不带校验位的 wxid
-            "nickname": parsed_config.get("nickname"),
-            "avatar": parsed_config.get("avatar"),
-            "latest_time": None,
-            "message": f"通过 global_config 检测到最近登录账号: {parsed_config['wxid']}"
-        }
-
-    # 2. 降级回退机制：原先基于 key_info.db 的时间探测逻辑
+    # 1. 优先使用 key_info.db 修改时间检测（最可靠）
     latest_time = None
     current_account = None
 

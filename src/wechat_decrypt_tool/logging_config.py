@@ -73,7 +73,7 @@ class WeChatLogger:
         # callers instantiate the manager and then call `setup_logging()` again.
         pass
     
-    def setup_logging(self, log_level: str = "INFO"):
+    def setup_logging(self, log_level: str = "DEBUG"):
         """设置日志配置"""
         # Allow overriding via env var for easier debugging (e.g. WECHAT_TOOL_LOG_LEVEL=DEBUG)
         env_level = str(os.environ.get("WECHAT_TOOL_LOG_LEVEL", "") or "").strip()
@@ -98,11 +98,10 @@ class WeChatLogger:
         desired_log_file = log_dir / f"{date_str}_wechat_tool.log"
 
         root_logger = logging.getLogger()
-        wants_console_handler = _can_use_logging_stream(sys.stdout)
-        if getattr(sys, "frozen", False) and not console_logging_forced:
-            wants_console_handler = False
-        if console_logging_disabled:
-            wants_console_handler = False
+        # 默认禁用控制台日志，除非显式启用
+        wants_console_handler = False
+        if console_logging_forced:
+            wants_console_handler = _can_use_logging_stream(sys.stdout)
 
         if WeChatLogger._initialized:
             current_log_file = Path(getattr(self, "log_file", desired_log_file))

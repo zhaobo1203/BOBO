@@ -19,6 +19,10 @@ import json
 from datetime import datetime
 from typing import Dict, List, Optional
 
+# 修复 Windows 控制台 Unicode 编码问题
+if sys.platform == 'win32':
+    sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+
 # 添加项目路径
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
