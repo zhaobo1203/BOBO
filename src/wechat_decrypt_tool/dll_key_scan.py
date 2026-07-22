@@ -7,9 +7,7 @@ results instead of writing JSONL files from a hard-coded path.
 
 from __future__ import annotations
 
-import multiprocessing
 import re
-from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
 
@@ -121,18 +119,13 @@ def extract_xor_keys_from_dll(
     if not tasks:
         return []
 
-    worker_count = max(1, int(max_workers or multiprocessing.cpu_count()))
-    worker_count = min(worker_count, len(tasks))
+    # 使用顺序执行替代 ProcessPoolExecutor
+    # 原因: PyInstaller onefile 模式下 multiprocessing 子进程会重新解压并执行整个 exe，
+    # 导致模块级代码在子进程中重复执行，造成死锁
+    # DLL扫描只在初始化时运行一次，顺序执行性能影响可忽略
     found_matches: list[dict[str, Any]] = []
-
-    if worker_count == 1:
-        for task in tasks:
-            found_matches.extend(worker_search(task))
-    else:
-        with ProcessPoolExecutor(max_workers=worker_count) as executor:
-            futures = [executor.submit(worker_search, task) for task in tasks]
-            for future in as_completed(futures):
-                found_matches.extend(future.result())
+    for task in tasks:
+        found_matches.extend(worker_search(task))
 
     found_matches.sort(key=lambda item: int(str(item.get("va") or "0"), 16))
     return found_matches

@@ -9,8 +9,13 @@ import sys
 import os
 import time
 import logging
+import multiprocessing
 from pathlib import Path
 from datetime import datetime
+
+# Windows PyInstaller 打包必须：防止 multiprocessing 子进程重新执行主程序
+# 必须在程序最开始时调用，否则会导致程序卡死
+multiprocessing.freeze_support()
 
 # 添加项目路径
 if not getattr(sys, 'frozen', False):
@@ -121,9 +126,22 @@ class SimpleMonitor:
             logger.info(f"[步骤2] 检测到账号: {self.account_id}, 数据路径: {self.data_path}")
             return True
         else:
-            self.data_path = detected_dirs[0]
-            self.print_step("账号识别", "done", "使用默认目录")
-            return True
+            # 账号检测失败时，尝试在检测到的目录中查找包含有效数据库的账号目录
+            self.data_path = self._find_any_valid_account_dir(detected_dirs)
+            if self.data_path:
+                # 从路径中提取账号ID
+                dir_name = Path(self.data_path).name
+                if dir_name.startswith('wxid_') or dir_name.startswith('wl_'):
+                    self.account_id = dir_name
+                self.print_step("账号识别", "done", f"自动发现: {self.account_id or '未知账号'}")
+                logger.info(f"[步骤2] 自动发现账号目录: {self.data_path}")
+                return True
+            else:
+                # 最后降级：使用第一个检测到的目录
+                self.data_path = detected_dirs[0]
+                self.print_step("账号识别", "done", "使用默认目录")
+                logger.warning(f"[步骤2] 未能找到有效账号目录，使用默认: {self.data_path}")
+                return True
 
     def _find_account_dir_with_db_storage(self, base_dirs: list, account_id: str):
         """查找包含有效 db_storage 的账号目录（参考项目的方法）"""
@@ -181,8 +199,71 @@ class SimpleMonitor:
                 continue
         return base_dirs[0] if base_dirs else None
 
+    def _find_any_valid_account_dir(self, base_dirs: list) -> str | None:
+        """在检测到的目录中查找包含有效数据库的账号目录
+        
+        当账号检测失败时，遍历检测到的目录，找到包含有效 db_storage 的账号子目录。
+        """
+        for base_dir in base_dirs:
+            base_path = Path(base_dir)
+            if not base_path.exists() or not base_path.is_dir():
+                continue
+            
+            logger.debug(f"[账号查找] 遍历目录: {base_dir}")
+            
+            try:
+                # 遍历子目录，查找 wxid_* 或 wl_* 开头的账号目录
+                for sub_dir in base_path.iterdir():
+                    if not sub_dir.is_dir():
+                        continue
+                    
+                    # 跳过非账号目录
+                    dir_name = sub_dir.name.lower()
+                    if dir_name in ['all users', 'applet', 'wmpf', 'backup', 'config']:
+                        continue
+                    
+                    # 检查是否包含有效的 session.db
+                    session_db = sub_dir / 'db_storage' / 'session' / 'session.db'
+                    if session_db.exists():
+                        logger.info(f"[账号查找] 找到有效账号目录: {sub_dir}")
+                        return str(sub_dir)
+                    
+                    # 也检查旧版路径
+                    session_db_alt = sub_dir / 'db_storage' / 'session.db'
+                    if session_db_alt.exists():
+                        logger.info(f"[账号查找] 找到有效账号目录(旧版路径): {sub_dir}")
+                        return str(sub_dir)
+                        
+            except (PermissionError, OSError) as e:
+                logger.debug(f"[账号查找] 遍历目录失败: {base_dir}, 错误: {e}")
+                continue
+            
+            # 检查 "WeChat Files" 子目录结构
+            wechat_files_path = base_path / 'WeChat Files'
+            if wechat_files_path.exists() and wechat_files_path.is_dir():
+                try:
+                    for sub_dir in wechat_files_path.iterdir():
+                        if not sub_dir.is_dir():
+                            continue
+                        
+                        dir_name = sub_dir.name.lower()
+                        if dir_name in ['all users', 'applet', 'wmpf', 'backup']:
+                            continue
+                        
+                        session_db = sub_dir / 'db_storage' / 'session' / 'session.db'
+                        if session_db.exists():
+                            logger.info(f"[账号查找] 找到有效账号目录(WeChat Files): {sub_dir}")
+                            return str(sub_dir)
+                            
+                except (PermissionError, OSError) as e:
+                    logger.debug(f"[账号查找] 遍历WeChat Files目录失败: {e}")
+                    continue
+        
+        logger.warning("[账号查找] 未找到任何有效的账号目录")
+        return None
+
     def step3_get_key(self):
-        """步骤3: 密钥获取"""
+        """步骤3: 密钥获取 - 每次启动重新获取，不使用旧密钥"""
         self.print_step("密钥获取", "doing")
 
         import json
@@ -191,13 +272,22 @@ class SimpleMonitor:
         exe_dir = get_exe_dir()
         cwd = Path.cwd()
 
-        # 方法1: Hook注入获取
+        # 清除旧的密钥文件，确保每次启动都重新获取
+        key_store_path = exe_dir / 'output' / 'account_keys.json'
+        if key_store_path.exists():
+            try:
+                key_store_path.unlink()
+                logger.info("[步骤3] 已清除旧密钥文件，将重新获取")
+            except Exception as e:
+                logger.warning(f"[步骤3] 清除旧密钥文件失败: {e}")
+
+        # Hook注入获取密钥
         logger.info("[步骤3] 尝试Hook注入获取密钥...")
 
         print()
         print("  [!] 需要重启微信以获取密钥")
         print("  [!] 请在微信重启后手动登录")
-        print("  [!] 等待时间最长60秒...")
+        print("  [!] 整体超时保护: 120秒，超时后将提供手动输入选项")
         print()
 
         try:
@@ -227,8 +317,18 @@ class SimpleMonitor:
             print(f"  [!] wx_key模块导入失败: {e}")
         except TimeoutError as e:
             logger.error(f"[步骤3] Hook获取密钥超时: {e}")
+            print()
             print(f"  [!] 获取密钥超时: {e}")
-            print("  [!] 请确保在60秒内完成微信登录")
+            print("  [!] 可能原因: 微信启动卡住、Hook初始化挂起或轮询无响应")
+            print()
+            # 超时降级：提供手动输入密钥选项
+            manual_key = self._prompt_manual_key()
+            if manual_key:
+                self.db_key = manual_key
+                self.print_step("密钥获取", "done", "手动输入")
+                logger.info("[步骤3] 使用手动输入密钥（超时降级）")
+                self._save_key()
+                return True
         except RuntimeError as e:
             logger.error(f"[步骤3] Hook运行时错误: {e}")
             print(f"  [!] Hook运行时错误: {e}")
@@ -238,54 +338,60 @@ class SimpleMonitor:
             print(f"  [!] Hook注入失败: {e}")
             print(f"  [!] 详细信息请查看日志文件")
 
-        # 方法2: 从已保存文件加载
-        logger.info("[步骤3] 尝试加载已保存密钥...")
-
-        store = {}
-        key_paths = [
-            exe_dir / 'output' / 'account_keys.json',
-            exe_dir / 'key_store.json',
-            cwd / 'output' / 'account_keys.json',
-            cwd / 'key_store.json',
-        ]
-
-        for key_path in key_paths:
-            if key_path.exists():
-                try:
-                    data = json.loads(key_path.read_text(encoding='utf-8'))
-                    if data and 'accounts' in data:
-                        store = data
-                        break
-                except Exception:
-                    pass
-
-        if store and 'accounts' in store:
-            for account_id, account_data in store.get('accounts', {}).items():
-                if account_id == self.account_id:
-                    key = account_data.get('db_key')
-                    if key and len(key) == 64:
-                        self.db_key = key
-                        self.print_step("密钥获取", "done", "已从存储加载")
-                        logger.info(f"[步骤3] 使用已保存密钥")
-                        return True
-
-            for account_data in store.get('accounts', {}).values():
-                stored_path = account_data.get('data_path', '')
-                if stored_path and self.data_path:
-                    normalized_stored = os.path.normpath(stored_path).lower()
-                    normalized_current = os.path.normpath(self.data_path).lower()
-                    if normalized_stored in normalized_current or normalized_current in normalized_stored:
-                        key = account_data.get('db_key')
-                        if key and len(key) == 64:
-                            self.db_key = key
-                            self.print_step("密钥获取", "done", "路径匹配成功")
-                            logger.info(f"[步骤3] 路径匹配到密钥")
-                            return True
-
-        self.print_step("密钥获取", "fail", "未找到密钥")
+        # 方法3: 所有方式都失败，提供手动输入降级
+        self.print_step("密钥获取", "fail", "自动获取未成功")
         print()
-        print("  请先运行密钥获取程序!")
+        print("  自动获取密钥失败，您可以：")
+        print("  1. 手动输入64位十六进制密钥")
+        print("  2. 确保 output/account_keys.json 文件存在且包含当前账号密钥")
+        print("  3. 重新运行程序并确保微信已正常登录")
+        print()
+        print("  常见原因：")
+        print("  - 微信未正确安装或安装路径异常")
+        print("  - 微信版本过新，Hook暂不支持")
+        print("  - 需要管理员权限运行")
+        print()
+
+        manual_key = self._prompt_manual_key()
+        if manual_key:
+            self.db_key = manual_key
+            self.print_step("密钥获取", "done", "手动输入")
+            logger.info("[步骤3] 使用手动输入密钥（降级）")
+            self._save_key()
+            return True
+
+        print()
+        print("  未提供密钥，程序将退出。")
+        print("  请通过以下方式获取密钥后重试：")
+        print("  - 使用其他工具导出密钥")
+        print("  - 检查 output/account_keys.json 是否存在")
+        print()
         return False
+
+    def _prompt_manual_key(self) -> str | None:
+        """提示用户手动输入64位十六进制密钥（超时降级）"""
+        import re
+        try:
+            print("  请输入64位十六进制密钥（按 Enter 跳过）: ", end="", flush=True)
+            raw = input().strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return None
+
+        if not raw:
+            return None
+
+        # 清理输入：去除 0x 前缀、空格、换行
+        cleaned = raw.lower().replace("0x", "").replace(" ", "").replace("\n", "").replace("\r", "")
+        # 只保留十六进制字符
+        cleaned = re.sub(r"[^0-9a-f]", "", cleaned)
+
+        if len(cleaned) != 64:
+            print(f"  [!] 密钥长度无效: 需要64位十六进制，当前输入长度: {len(cleaned)}")
+            return None
+
+        logger.info("[步骤3] 用户手动输入密钥，长度验证通过")
+        return cleaned
 
     def _save_key(self):
         """保存密钥到存储"""
@@ -557,32 +663,85 @@ class SimpleMonitor:
         return None
 
     def _find_session_db(self):
-        """查找session.db路径"""
+        """查找session.db路径
+        
+        支持两种情况：
+        1. data_path 已经是账号目录（包含 db_storage）
+        2. data_path 是微信数据根目录（包含 wxid_* 子目录）
+        """
         if not self.data_path:
+            logger.warning("[session.db查找] data_path 未设置")
             return None
 
-        session_paths = [
-            Path(self.data_path) / 'db_storage' / 'session' / 'session.db',
-            Path(self.data_path) / 'db_storage' / 'session.db',
-            Path(self.data_path) / 'session.db',
-        ]
-
         data_path_obj = Path(self.data_path)
-        if data_path_obj.exists():
-            try:
-                for item in data_path_obj.iterdir():
-                    if item.is_dir() and not item.name.startswith('.'):
-                        if item.name.startswith('wxid_') or item.name.startswith('wl_'):
-                            db_path = item / 'db_storage' / 'session' / 'session.db'
-                            if db_path.exists():
-                                session_paths.append(db_path)
-            except (PermissionError, OSError):
-                pass
+        if not data_path_obj.exists():
+            logger.warning(f"[session.db查找] 路径不存在: {self.data_path}")
+            return None
 
-        for path in session_paths:
+        # 优先检查：data_path 已经是账号目录
+        direct_paths = [
+            data_path_obj / 'db_storage' / 'session' / 'session.db',
+            data_path_obj / 'db_storage' / 'session.db',
+            data_path_obj / 'session.db',
+        ]
+        
+        for path in direct_paths:
+            logger.debug(f"[session.db查找] 检查直接路径: {path}")
             if path.exists():
+                logger.info(f"[session.db查找] 找到: {path}")
                 return str(path)
 
+        # 如果直接路径不存在，检查是否是根目录（包含账号子目录）
+        logger.debug(f"[session.db查找] 直接路径不存在，检查子目录...")
+        
+        try:
+            for item in data_path_obj.iterdir():
+                if not item.is_dir():
+                    continue
+                
+                # 跳过非账号目录
+                dir_name = item.name.lower()
+                if dir_name in ['all users', 'applet', 'wmpf', 'backup', 'config', 'cache']:
+                    continue
+                
+                # 检查账号子目录中的 session.db
+                session_db = item / 'db_storage' / 'session' / 'session.db'
+                logger.debug(f"[session.db查找] 检查子目录: {session_db}")
+                if session_db.exists():
+                    logger.info(f"[session.db查找] 在子目录找到: {session_db}")
+                    return str(session_db)
+                
+                # 也检查旧版路径
+                session_db_alt = item / 'db_storage' / 'session.db'
+                if session_db_alt.exists():
+                    logger.info(f"[session.db查找] 在子目录找到(旧版): {session_db_alt}")
+                    return str(session_db_alt)
+                    
+        except (PermissionError, OSError) as e:
+            logger.warning(f"[session.db查找] 遍历目录失败: {e}")
+
+        # 检查 "WeChat Files" 子目录结构
+        wechat_files_path = data_path_obj / 'WeChat Files'
+        if wechat_files_path.exists() and wechat_files_path.is_dir():
+            logger.debug(f"[session.db查找] 检查 WeChat Files 子目录...")
+            try:
+                for item in wechat_files_path.iterdir():
+                    if not item.is_dir():
+                        continue
+                    
+                    dir_name = item.name.lower()
+                    if dir_name in ['all users', 'applet', 'wmpf', 'backup']:
+                        continue
+                    
+                    session_db = item / 'db_storage' / 'session' / 'session.db'
+                    if session_db.exists():
+                        logger.info(f"[session.db查找] 在 WeChat Files 找到: {session_db}")
+                        return str(session_db)
+                        
+            except (PermissionError, OSError) as e:
+                logger.warning(f"[session.db查找] 遍历 WeChat Files 失败: {e}")
+
+        logger.warning(f"[session.db查找] 未找到 session.db，搜索路径: {self.data_path}")
         return None
 
     def step5_select_group(self):
@@ -1014,11 +1173,9 @@ class SimpleMonitor:
                 if len(content.strip()) < 1:
                     continue  # 跳过空消息
 
-                # 显示完整消息内容（不截断）
-                content = content[:200] if len(content) > 200 else content
-
                 time_str = datetime.fromtimestamp(msg_time_int).strftime('%H:%M:%S') if msg_time_int else "--:--:--"
                 print(f"    [{time_str}] {sender}: {content}")
+                print()  # 消息之间空一行
 
             print()
 
@@ -1118,8 +1275,8 @@ class SimpleMonitor:
 
                             time_str = datetime.fromtimestamp(msg_time_int).strftime('%H:%M:%S')
                             # 显示完整消息内容（不截断）
-                            content_preview = content[:200] if len(content) > 200 else content
-                            print(f"  [{time_str}] {sender}: {content_preview}", flush=True)
+                            print(f"  [{time_str}] {sender}: {content}", flush=True)
+                            print()  # 消息之间空一行
 
                             # 保存到数据库
                             try:
@@ -1230,20 +1387,24 @@ class SimpleMonitor:
                 cursor.execute(f"PRAGMA table_info({actual_table})")
                 columns = [col[1] for col in cursor.fetchall()]
 
-                # 查询消息
+                # 查询消息 - 使用 LEFT JOIN Name2Id 将 real_sender_id 映射到 user_name
                 # 根据字段选择查询语句
                 if 'compress_content' in columns:
                     cursor.execute(f"""
-                        SELECT local_id, create_time, message_content, compress_content, real_sender_id
-                        FROM {actual_table}
-                        ORDER BY create_time DESC
+                        SELECT m.local_id, m.create_time, m.message_content, m.compress_content, m.real_sender_id,
+                               COALESCE(n.user_name, '') as sender_username
+                        FROM {actual_table} m
+                        LEFT JOIN Name2Id n ON m.real_sender_id = n.rowid
+                        ORDER BY m.create_time DESC
                         LIMIT ?
                     """, (limit,))
                 else:
                     cursor.execute(f"""
-                        SELECT local_id, create_time, message_content, real_sender_id
-                        FROM {actual_table}
-                        ORDER BY create_time DESC
+                        SELECT m.local_id, m.create_time, m.message_content, m.real_sender_id,
+                               COALESCE(n.user_name, '') as sender_username
+                        FROM {actual_table} m
+                        LEFT JOIN Name2Id n ON m.real_sender_id = n.rowid
+                        ORDER BY m.create_time DESC
                         LIMIT ?
                     """, (limit,))
 
@@ -1278,14 +1439,17 @@ class SimpleMonitor:
                             except Exception:
                                 content = str(content)
 
-                        # 获取发送者
-                        sender_wxid = row['real_sender_id'] if row['real_sender_id'] else '未知'
+                        # 获取发送者 - 优先使用 JOIN 得到的 sender_username
+                        sender_username = row['sender_username'] if 'sender_username' in row.keys() else ''
+                        if not sender_username:
+                            # 如果 JOIN 失败，使用原始的 real_sender_id
+                            sender_username = str(row['real_sender_id']) if row['real_sender_id'] else '未知'
 
                         messages.append({
                             'local_id': row['local_id'],
                             'create_time': row['create_time'] or 0,
                             'message_content': content or '',
-                            'sender_username': sender_wxid
+                            'sender_username': sender_username
                         })
                     except Exception as e:
                         logger.warning(f"[消息查询] 解析消息失败: {e}")
@@ -1344,14 +1508,106 @@ class SimpleMonitor:
         input("  按 Enter 键退出...")
 
 
+def _get_log_file_path() -> Path | None:
+    """获取最新的日志文件路径"""
+    exe_dir = get_exe_dir()
+    log_dir = exe_dir / 'logs'
+    
+    if not log_dir.exists():
+        log_dir = Path.cwd() / 'logs'
+    
+    if not log_dir.exists():
+        return None
+    
+    # 查找最新的日志文件
+    log_files = list(log_dir.glob('app_*.log'))
+    if log_files:
+        return max(log_files, key=lambda f: f.stat().st_mtime)
+    
+    log_files = list(log_dir.glob('*.log'))
+    if log_files:
+        return max(log_files, key=lambda f: f.stat().st_mtime)
+    
+    return None
+
+
+def _open_log_file():
+    """打开日志文件"""
+    log_path = _get_log_file_path()
+    if log_path and log_path.exists():
+        import subprocess
+        try:
+            if sys.platform == 'win32':
+                os.startfile(str(log_path))
+            else:
+                subprocess.run(['open', str(log_path)] if sys.platform == 'darwin' else ['xdg-open', str(log_path)])
+            print(f"\n  已打开日志文件: {log_path.name}")
+        except Exception as e:
+            print(f"\n  无法打开日志文件: {e}")
+            print(f"  日志路径: {log_path}")
+    else:
+        print("\n  未找到日志文件")
+
+
+def _cleanup_key_file():
+    """清理密钥文件 - 程序退出时调用"""
+    try:
+        exe_dir = get_exe_dir()
+        key_store_path = exe_dir / 'output' / 'account_keys.json'
+        if key_store_path.exists():
+            key_store_path.unlink()
+            logger.info("[清理] 已清除密钥文件")
+    except Exception as e:
+        logger.warning(f"[清理] 清除密钥文件失败: {e}")
+
+
 def main():
-    """主函数"""
+    """主函数 - 生产版本（带全局异常处理）"""
     try:
         monitor = SimpleMonitor()
         monitor.run()
+        # 正常退出时清除密钥
+        _cleanup_key_file()
+    except KeyboardInterrupt:
+        print('\n\n[用户中断]')
+        _cleanup_key_file()
+        sys.exit(0)
     except Exception as e:
-        logger.exception(f"程序异常: {e}")
-        print(f"\n  程序异常: {e}")
+        # 异常退出时也清除密钥
+        _cleanup_key_file()
+        
+        # 记录异常到日志
+        logger.exception(f"程序发生未捕获异常: {e}")
+        
+        # 显示友好的错误信息
+        print()
+        print("=" * 60)
+        print("  程序遇到错误，抱歉!")
+        print("=" * 60)
+        print()
+        print(f"  错误类型: {type(e).__name__}")
+        print(f"  错误信息: {str(e)[:100]}")
+        print()
+        print("  可能的解决方案:")
+        print("  1. 确保微信已登录")
+        print("  2. 以管理员权限运行程序")
+        print("  3. 检查杀毒软件是否拦截")
+        print()
+        
+        # 尝试打开日志文件
+        log_path = _get_log_file_path()
+        if log_path:
+            print(f"  日志文件: {log_path}")
+            
+            # 询问是否打开日志
+            try:
+                choice = input("\n  是否打开日志文件查看详情? (y/n): ").strip().lower()
+                if choice == 'y' or choice == 'yes':
+                    _open_log_file()
+            except (EOFError, KeyboardInterrupt):
+                pass
+        
+        print()
         input("  按 Enter 键退出...")
         sys.exit(1)
 

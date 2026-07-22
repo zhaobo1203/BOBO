@@ -11,7 +11,12 @@
 
 import sys
 import os
+import multiprocessing
 from pathlib import Path
+
+# Windows PyInstaller 打包必须：防止 multiprocessing 子进程重新执行主程序
+# 必须在程序最开始时调用，否则会导致程序卡死
+multiprocessing.freeze_support()
 
 # 添加项目路径（开发环境）
 if not getattr(sys, 'frozen', False):

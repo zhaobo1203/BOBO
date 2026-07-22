@@ -23,6 +23,7 @@ import httpx
 from pathlib import Path
 from typing import Optional, List, Dict, Any
 from dataclasses import dataclass
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from packaging import version as pkg_version  # 建议使用 packaging 库处理版本比较
 from .wechat_detection import detect_wechat_installation
 from .dll_key_scan import extract_xor_keys_from_dll
@@ -536,6 +537,8 @@ class WeChatKeyFetcher:
     def __init__(self):
         self.process_names = {name.lower() for name in WECHAT_EXECUTABLE_NAMES}
         self.timeout_seconds = 60
+        self.hook_init_max_retries = 3  # Hook 初始化最大重试次数
+        self.hook_init_retry_interval = 2.0  # 重试间隔（秒）
 
     def _is_wechat_process(self, name: Any) -> bool:
         return str(name or "").strip().lower() in self.process_names
@@ -560,7 +563,7 @@ class WeChatKeyFetcher:
         try:
             normalized_exe_path = _normalize_user_path(exe_path)
             process = subprocess.Popen(normalized_exe_path)
-            time.sleep(2)
+            time.sleep(3)  # 增加等待时间：2秒 -> 3秒，确保进程稳定
             candidates = []
 
             for proc in psutil.process_iter(['pid', 'name', 'exe', 'cmdline']):
@@ -590,8 +593,11 @@ class WeChatKeyFetcher:
             logger.error(f"启动微信失败: {e}")
             raise RuntimeError(f"无法启动微信: {e}")
 
-    def fetch_db_key(self, wechat_install_path: Optional[str] = None) -> dict:
-        """调用 wx_key 仅获取数据库密钥 (Hook 模式)"""
+    # 整体超时时间（秒）：覆盖 kill + launch + hook初始化 + 轮询 的全流程
+    OVERALL_TIMEOUT_SECONDS = 120
+
+    def _fetch_db_key_impl(self, wechat_install_path: Optional[str] = None) -> dict:
+        """fetch_db_key 的实际执行逻辑（可被整体超时保护包裹）"""
         if wx_key is None:
             raise RuntimeError("wx_key 模块未安装或加载失败")
 
@@ -621,10 +627,27 @@ class WeChatKeyFetcher:
         pid = self.launch_wechat(exe_path)
         logger.info(f"WeChat launched, PID: {pid}")
 
-        # 仅传入 PID，触发数据库密钥自动 Hook
-        if not wx_key.initialize_hook(pid):
-            err = wx_key.get_last_error_msg()
-            raise RuntimeError(f"数据库 Hook 初始化失败: {err}")
+        # Hook 初始化（带重试机制）
+        hook_initialized = False
+        last_error = ""
+        
+        for retry in range(1, self.hook_init_max_retries + 1):
+            logger.info(f"[Hook] 尝试初始化 ({retry}/{self.hook_init_max_retries})...")
+            
+            if wx_key.initialize_hook(pid):
+                hook_initialized = True
+                logger.info(f"[Hook] 初始化成功 (第 {retry} 次尝试)")
+                break
+            
+            last_error = wx_key.get_last_error_msg() or "未知错误"
+            logger.warning(f"[Hook] 初始化失败: {last_error}")
+            
+            if retry < self.hook_init_max_retries:
+                logger.info(f"[Hook] 等待 {self.hook_init_retry_interval} 秒后重试...")
+                time.sleep(self.hook_init_retry_interval)
+        
+        if not hook_initialized:
+            raise RuntimeError(f"数据库 Hook 初始化失败 (已重试 {self.hook_init_max_retries} 次): {last_error}")
 
         start_time = time.time()
         found_db_key = None
@@ -649,11 +672,42 @@ class WeChatKeyFetcher:
                 time.sleep(0.1)
         finally:
             logger.info("Cleaning up hook...")
-            wx_key.cleanup_hook()
+            try:
+                wx_key.cleanup_hook()
+            except Exception as cleanup_err:
+                logger.warning("[Hook] cleanup_hook 异常（可忽略）: %s", cleanup_err)
 
         return {
             "db_key": found_db_key
         }
+
+    def fetch_db_key(self, wechat_install_path: Optional[str] = None) -> dict:
+        """调用 wx_key 仅获取数据库密钥 (Hook 模式)，带整体超时保护"""
+        logger.info(
+            "[db_key] fetch_db_key 开始，整体超时=%ds",
+            self.OVERALL_TIMEOUT_SECONDS,
+        )
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(self._fetch_db_key_impl, wechat_install_path)
+            try:
+                result = future.result(timeout=self.OVERALL_TIMEOUT_SECONDS)
+            except FuturesTimeoutError:
+                logger.error(
+                    "[db_key] fetch_db_key 整体超时 (%ds)，强制终止",
+                    self.OVERALL_TIMEOUT_SECONDS,
+                )
+                # 尝试清理 hook 资源
+                try:
+                    wx_key.cleanup_hook()
+                except Exception:
+                    pass
+                raise TimeoutError(
+                    f"获取数据库密钥整体超时 ({self.OVERALL_TIMEOUT_SECONDS}s)，"
+                    "可能原因：微信启动卡住、Hook初始化挂起或轮询无响应。"
+                    "请检查微信是否正常运行，或尝试重启程序。"
+                )
+        logger.info("[db_key] fetch_db_key 正常完成")
+        return result
 
 
 def get_db_key_workflow(

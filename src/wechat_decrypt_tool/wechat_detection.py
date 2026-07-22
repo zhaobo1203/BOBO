@@ -814,8 +814,8 @@ def detect_wechat_installation(data_root_path: str | None = None) -> Dict[str, A
     process_list = get_process_list()
 
     for pid, process_name in process_list:
-        # 检查Weixin.exe进程
-        if process_name.lower() == 'weixin.exe':
+        # 检查Weixin.exe或WeChat.exe进程
+        if process_name.lower() in ['weixin.exe', 'wechat.exe']:
             try:
                 exe_path = get_process_exe_path(pid)
                 if exe_path:

@@ -1,11 +1,14 @@
 import ctypes
-import multiprocessing
 import struct
 import hmac
 import os
 from ctypes import wintypes
-from multiprocessing import freeze_support
 import sys
+
+# 使用 ThreadPoolExecutor 替代 multiprocessing.Pool
+# 原因: PyInstaller onefile 模式下 multiprocessing 子进程会重新解压并执行整个 exe，
+# 导致模块级代码（如日志初始化）在子进程中重复执行，造成死锁
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import pymem
 from Crypto.Protocol.KDF import PBKDF2
@@ -351,16 +354,18 @@ def get_key(pid, process_handle, buf, internal_db_key=None):
         return (lst[i * k + min(i, m):(i + 1) * k + min(i + 1, m)] for i in range(n))
 
     keys = []
-    pool = multiprocessing.Pool(processes=multiprocessing.cpu_count() // 2)
-    results = pool.starmap(get_key_inner, ((pid, process_info_) for process_info_ in
-                                           split_list(process_infos, min(len(process_infos), 40))))
-    pool.close()
-    pool.join()
+    # 使用 ThreadPoolExecutor 替代 multiprocessing.Pool
+    # 避免PyInstaller onefile模式下子进程死锁问题
+    worker_count = max(1, os.cpu_count() // 2)
+    task_list = list(split_list(process_infos, min(len(process_infos), 40)))
 
     raw_keys = []
-    for r in results:
-        if r:
-            raw_keys += r
+    with ThreadPoolExecutor(max_workers=worker_count) as executor:
+        futures = [executor.submit(get_key_inner, pid, process_info_) for process_info_ in task_list]
+        for future in as_completed(futures):
+            r = future.result()
+            if r:
+                raw_keys += r
 
     # 合并去重
     unique_keys = list(set(raw_keys))
@@ -402,23 +407,28 @@ def verify_keys(keys, buf, internal_db_key=None):
         print("[-] No key candidates found")
         return None
 
-    worker_count = max(1, multiprocessing.cpu_count() // 2)
+    # 使用 ThreadPoolExecutor 替代 multiprocessing.Pool
+    # 避免PyInstaller onefile模式下子进程死锁问题
+    worker_count = max(1, os.cpu_count() // 2)
     print(f"[*] Testing {total} filtered key candidates with {worker_count} workers...")
 
     completed = 0
     last_percent = -1
-    with multiprocessing.Pool(processes=worker_count) as pool:
-        task_iter = ((key, buf, internal_db_key) for key in keys)
-        for r in pool.imap_unordered(verify_worker, task_iter, chunksize=16):
+    with ThreadPoolExecutor(max_workers=worker_count) as executor:
+        futures = {executor.submit(verify_worker, (key, buf, internal_db_key)): key for key in keys}
+        for future in as_completed(futures):
             completed += 1
             percent = int((completed / total) * 100)
             if percent != last_percent:
                 print(f"[*] Verify progress: {completed}/{total} ({percent}%)")
                 last_percent = percent
 
+            r = future.result()
             if r:
                 print(f"[+] Key found: {bytes.hex(r)}")
-                pool.terminate()
+                # 取消剩余任务
+                for f in futures:
+                    f.cancel()
                 return bytes.hex(r)
 
     print("[-] Verification completed, no valid key")
@@ -467,7 +477,6 @@ def recover_key(pid, db_file_path=None, internal_db_key=None):
 
 def main():
     """命令行入口函数"""
-    freeze_support()
 
     try:
         pm = pymem.Pymem("Weixin.exe")
