@@ -26,6 +26,10 @@ dependencies = [
     "yara-python>=4.5.2; sys_platform == 'win32'",
     "packaging",
     "httpx",
+    # A股数据库依赖
+    "akshare>=1.12.0",
+    "baostock>=0.8.9",
+    "efinance>=0.5.5",
 ]
 
 [project.optional-dependencies]
