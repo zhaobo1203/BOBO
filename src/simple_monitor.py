@@ -278,10 +278,13 @@ class SimpleMonitor:
             try:
                 key_store_path.unlink()
                 logger.info("[步骤3] 已清除旧密钥文件，将重新获取")
+                print("    检查旧密钥文件: 已清除，将重新获取")
             except Exception as e:
                 logger.warning(f"[步骤3] 清除旧密钥文件失败: {e}")
+        else:
+            logger.info("[步骤3] 无旧密钥文件，将重新获取")
+            print("    检查旧密钥文件: 无旧文件，将重新获取")
 
-        # Hook注入获取密钥
         logger.info("[步骤3] 尝试Hook注入获取密钥...")
 
         print()
