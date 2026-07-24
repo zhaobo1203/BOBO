@@ -19,7 +19,7 @@ from .services.matcher import Matcher
 from .services.statistics import StatisticsService
 from .services.storage import StorageService
 from .api.routes import router, init_services
-from .dashboard import start_dashboard_process
+from .dashboard import start_dashboard_thread
 
 # 全局服务实例
 stock_loader = StockLoader()
@@ -147,17 +147,16 @@ async def lifespan(app: FastAPI):
     task = asyncio.create_task(periodic_incremental_update())
     logger.info(f"定时增量更新已启动，间隔{INCREMENTAL_UPDATE_INTERVAL}秒")
 
-    # 启动终端看板（独立子进程，不阻塞uvicorn）
-    dashboard_process = start_dashboard_process()
-    logger.info("终端看板已启动（独立子进程），30秒刷新间隔")
+    # 启动终端看板（独立线程，在PowerShell中显示）
+    dashboard_thread = start_dashboard_thread()
+    logger.info("终端看板已启动（独立线程），10秒刷新间隔")
 
     yield
 
-    # 关闭时取消定时任务和看板进程
+    # 关闭时取消定时任务和看板线程
     task.cancel()
-    if dashboard_process and dashboard_process.is_alive():
-        dashboard_process.terminate()
-        dashboard_process.join(timeout=3)
+    if dashboard_thread and dashboard_thread.is_alive():
+        dashboard_thread.join(timeout=3)
     logger.info("模块3 数据分析服务已停止")
 
 

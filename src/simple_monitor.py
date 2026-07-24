@@ -1133,7 +1133,7 @@ class SimpleMonitor:
         if self.handle and self.handle > 0:
             try:
                 from wechat_decrypt_tool.wcdb_realtime import get_messages
-                messages = get_messages(self.handle, group_id, limit=20)
+                messages = get_messages(self.handle, group_id, limit=100)
                 if messages:
                     print(f"  [OK] 使用 WCDB 获取到 {len(messages)} 条历史消息")
             except Exception as e:
@@ -1142,7 +1142,7 @@ class SimpleMonitor:
         # 如果 WCDB 失败，尝试静态解密
         if not messages and getattr(self, 'use_static_mode', False):
             print("  [..] WCDB 方式失败，尝试静态解密...")
-            messages = self._get_messages_static(group_id, limit=20)
+            messages = self._get_messages_static(group_id, limit=100)
 
         if messages:
             # 显示历史消息（最新的5条）
@@ -1181,6 +1181,43 @@ class SimpleMonitor:
                 print()  # 消息之间空一行
 
             print()
+
+            # 保存历史消息到数据库
+            history_saved = 0
+            for msg in messages:
+                msg_time = msg.get('create_time') or msg.get('createTime') or 0
+                try:
+                    msg_time_int = int(msg_time) if msg_time else 0
+                except:
+                    msg_time_int = 0
+
+                sender_wxid = msg.get('sender_username') or msg.get('sender') or '未知'
+                sender = self._get_display_name(sender_wxid)
+                raw_content = msg.get('message_content') or msg.get('content') or ''
+                content = self.decode_message(raw_content)
+
+                if self._is_non_text_message(content):
+                    continue
+                content = self._clean_message_content(content)
+                if len(content.strip()) < 1:
+                    continue
+
+                try:
+                    storage.save_message(
+                        sender_nickname=sender,
+                        message_content=content,
+                        send_time=datetime.fromtimestamp(msg_time_int),
+                        group_name=group_name,
+                        group_id=group_id,
+                        sender_id=sender_wxid
+                    )
+                    history_saved += 1
+                except Exception as e:
+                    logger.warning(f"[监控] 保存历史消息失败: {e}")
+
+            if history_saved > 0:
+                print(f"  [OK] 已保存 {history_saved} 条历史消息到数据库")
+                print()
 
             # 更新最新消息时间戳
             for msg in messages:

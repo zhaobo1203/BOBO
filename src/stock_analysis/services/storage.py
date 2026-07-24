@@ -3,6 +3,7 @@
 将匹配结果存入stock_mentions.db，支持全量和增量更新
 """
 import sqlite3
+import time
 import logging
 from datetime import datetime
 from typing import List, Optional
@@ -174,16 +175,32 @@ class StorageService:
         """
         last_id = self.get_last_processed_id()
 
-        conn = sqlite3.connect(self.messages_db_path)
-        cursor = conn.cursor()
-        cursor.execute("""
-            SELECT id, sender_nickname, message_content, send_time, group_name
-            FROM group_messages
-            WHERE id > ?
-            ORDER BY id
-        """, (last_id,))
-        rows = cursor.fetchall()
-        conn.close()
+        try:
+            conn = sqlite3.connect(self.messages_db_path, timeout=30)
+            conn.execute("PRAGMA journal_mode=WAL")
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT id, sender_nickname, message_content, send_time, group_name
+                FROM group_messages
+                WHERE id > ?
+                ORDER BY id
+            """, (last_id,))
+            rows = cursor.fetchall()
+            conn.close()
+        except sqlite3.OperationalError as e:
+            logger.warning(f"读取messages.db失败(锁定?): {e}, 重试...")
+            time.sleep(1)
+            conn = sqlite3.connect(self.messages_db_path, timeout=30)
+            conn.execute("PRAGMA journal_mode=WAL")
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT id, sender_nickname, message_content, send_time, group_name
+                FROM group_messages
+                WHERE id > ?
+                ORDER BY id
+            """, (last_id,))
+            rows = cursor.fetchall()
+            conn.close()
 
         logger.info(f"发现{len(rows)}条新消息(已处理至ID={last_id})")
         return rows
@@ -195,15 +212,30 @@ class StorageService:
         Returns:
             消息元组列表 (id, sender_nickname, message_content, send_time, group_name)
         """
-        conn = sqlite3.connect(self.messages_db_path)
-        cursor = conn.cursor()
-        cursor.execute("""
-            SELECT id, sender_nickname, message_content, send_time, group_name
-            FROM group_messages
-            ORDER BY id
-        """)
-        rows = cursor.fetchall()
-        conn.close()
+        try:
+            conn = sqlite3.connect(self.messages_db_path, timeout=30)
+            conn.execute("PRAGMA journal_mode=WAL")
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT id, sender_nickname, message_content, send_time, group_name
+                FROM group_messages
+                ORDER BY id
+            """)
+            rows = cursor.fetchall()
+            conn.close()
+        except sqlite3.OperationalError as e:
+            logger.warning(f"读取messages.db失败(锁定?): {e}, 重试...")
+            time.sleep(1)
+            conn = sqlite3.connect(self.messages_db_path, timeout=30)
+            conn.execute("PRAGMA journal_mode=WAL")
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT id, sender_nickname, message_content, send_time, group_name
+                FROM group_messages
+                ORDER BY id
+            """)
+            rows = cursor.fetchall()
+            conn.close()
 
         logger.info(f"从消息数据库加载{len(rows)}条消息")
         return rows

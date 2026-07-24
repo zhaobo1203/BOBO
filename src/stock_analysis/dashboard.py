@@ -25,7 +25,7 @@ if sys.platform == 'win32':
 logger = logging.getLogger(__name__)
 
 # 看板刷新间隔（秒）
-DASHBOARD_REFRESH_INTERVAL = 30
+DASHBOARD_REFRESH_INTERVAL = 10  # 10秒（与增量更新同步）
 
 # API基础URL
 API_BASE = "http://localhost:8000"
@@ -165,7 +165,7 @@ def render_dashboard(refresh_msg: str = "", month_label: str = ""):
     lines.append("+" + "-" * 62 + "+")
 
     # 操作提示（始终显示快捷键）
-    lines.append("|  [R]刷新 [M]月份 [Q]退出  30秒自动刷新")
+    lines.append("|  [R]刷新 [M]月份 [Q]退出  10秒自动刷新")
 
     # 刷新结果消息（在快捷键下方单独一行）
     if refresh_msg:
@@ -405,16 +405,18 @@ def _dashboard_process_main():
     dashboard_loop(stop_event)
 
 
-def start_dashboard_process():
+def start_dashboard_thread():
     """
-    启动看板独立子进程（供main.py调用）
-    子进程独立运行，不会阻塞uvicorn主进程的终端输入
-    返回Process对象
+    启动看板独立线程（供main.py调用）
+    线程在主进程中运行，共享终端输出，在PowerShell中显示看板
+    返回Thread对象
     """
-    p = multiprocessing.Process(
-        target=_dashboard_process_main,
-        name="dashboard-process",
+    stop_event = threading.Event()
+    t = threading.Thread(
+        target=dashboard_loop,
+        args=(stop_event,),
+        name="dashboard-thread",
         daemon=True,
     )
-    p.start()
-    return p
+    t.start()
+    return t

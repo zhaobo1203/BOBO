@@ -20,7 +20,7 @@ API_HOST = "0.0.0.0"
 API_PORT = 8000
 
 # 增量更新间隔（秒）
-INCREMENTAL_UPDATE_INTERVAL = 300  # 5分钟
+INCREMENTAL_UPDATE_INTERVAL = 10  # 10秒（接近实时）
 
 # A股数据过滤规则
 EXCLUDE_NAME_PATTERNS = ["指数", "退市"]
