@@ -4,7 +4,7 @@ setlocal enabledelayedexpansion
 
 echo.
 echo ========================================
-echo  微信群消息监听系统 - 打包脚本 v2.0
+echo  微信群消息监听系统 - 打包脚本 v2.0.0
 echo ========================================
 echo.
 
@@ -82,7 +82,7 @@ echo.
 REM ============== 步骤4: 验证输出 ==============
 echo [4/6] 验证输出文件...
 
-set EXE_FILE=dist\微信群消息监听.exe
+set EXE_FILE=dist\微信群消息监听_v2.0.0.exe
 
 if not exist "%EXE_FILE%" (
     echo [错误] 未生成EXE文件: %EXE_FILE%
@@ -120,7 +120,7 @@ if exist "vc_redist.x64.exe" (
 )
 
 REM 创建使用说明
-echo 微信群消息监听系统 v1.0 > release\使用说明.txt
+echo 微信群消息监听系统 v2.0.0 > release\使用说明.txt
 echo. >> release\使用说明.txt
 echo 使用方法: >> release\使用说明.txt
 echo 1. 确保已安装微信并登录 >> release\使用说明.txt

@@ -63,7 +63,7 @@ exe = EXE(
     a.binaries,
     a.datas,
     [],
-    name='微信群消息监听',
+    name='微信群消息监听_v2.0.0',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
