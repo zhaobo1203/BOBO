@@ -1,15 +1,17 @@
 """
 消息文本匹配引擎
-精确匹配股票名称和代码，严格边界判断
+精确匹配股票名称和代码，严格边界判断，黑名单过滤
 """
 import re
+import json
 import logging
-from typing import List, Tuple, Optional
+from typing import List, Tuple, Optional, Dict
 
 from ..config.settings import (
     ENCRYPTED_DATA_MIN_LENGTH,
     XML_START_MARKERS,
     SENDER_PREFIX_PATTERN,
+    BLACKLIST_PATH,
 )
 from ..models.stock import Stock
 from ..models.mention import MentionRecord
@@ -39,6 +41,15 @@ class Matcher:
         "评级", "目标价", "市盈率", "市净率", "净利润", "营收",
     ]
 
+    # 中文常见动词/副词/助词：股票名称后紧跟这些词时视为有效边界
+    # 例如："美利信已经走出了趋势" → "已"在此列表中 → 有效匹配
+    CHINESE_VERB_PARTICLES = set(
+        "已经也已正在将将要会能不能得可以可"
+        "还还有又却但而且或者与及和跟比较更"
+        "最就才只是到从被把给让向对于按"
+        "了着过地得呢吗吧啊呀嘛"
+    )
+
     # 6位股票代码正则
     STOCK_CODE_PATTERN = re.compile(r"(?<!\d)(\d{6})(?!\d)")
 
@@ -54,7 +65,29 @@ class Matcher:
         self.code_index = code_index
         # 按名称长度降序排列，优先匹配更长的名称
         self.sorted_names = sorted(name_index.keys(), key=len, reverse=True)
-        logger.info(f"匹配引擎初始化完成，名称索引{len(name_index)}条，代码索引{len(code_index)}条")
+        # 加载黑名单
+        self.blacklist = self._load_blacklist()
+        logger.info(f"匹配引擎初始化完成，名称索引{len(name_index)}条，代码索引{len(code_index)}条，黑名单{sum(len(v) for v in self.blacklist.values())}条")
+
+    def _load_blacklist(self) -> Dict[str, List[str]]:
+        """
+        加载黑名单配置文件
+
+        Returns:
+            黑名单字典 {股票名称关键词: [混淆词组列表]}
+        """
+        try:
+            if BLACKLIST_PATH.exists():
+                with open(str(BLACKLIST_PATH), 'r', encoding='utf-8') as f:
+                    blacklist = json.load(f)
+                logger.info(f"黑名单配置加载完成: {len(blacklist)}个关键词, 共{sum(len(v) for v in blacklist.values())}条黑名单词组")
+                return blacklist
+            else:
+                logger.warning(f"黑名单配置文件不存在: {BLACKLIST_PATH}")
+                return {}
+        except Exception as e:
+            logger.error(f"加载黑名单配置失败: {e}")
+            return {}
 
     def match_message(self, message_id: int, content: str,
                       sender: str, send_time: str,
@@ -79,9 +112,13 @@ class Matcher:
 
         records = []
 
-        # 2. 名称精确匹配
+        # 2. 名称精确匹配（同一条消息同一只股票只算1次提及）
         name_matches = self._match_by_name(cleaned_content)
+        seen_codes = set()
         for stock, match_type in name_matches:
+            if stock.code in seen_codes:
+                continue
+            seen_codes.add(stock.code)
             record = MentionRecord(
                 message_id=message_id,
                 stock_code=stock.code,
@@ -94,22 +131,23 @@ class Matcher:
             )
             records.append(record)
 
-        # 3. 代码精确匹配
+        # 3. 代码精确匹配（同一条消息同一只股票不重复计数）
         code_matches = self._match_by_code(cleaned_content)
         for stock, match_type in code_matches:
-            # 避免重复（同一条消息同一只股票不重复计数）
-            if not any(r.stock_code == stock.code for r in records):
-                record = MentionRecord(
-                    message_id=message_id,
-                    stock_code=stock.code,
-                    stock_name=stock.name,
-                    match_type=match_type,
-                    sender=sender,
-                    message_content=content,
-                    send_time=send_time,
-                    group_name=group_name,
-                )
-                records.append(record)
+            if stock.code in seen_codes:
+                continue
+            seen_codes.add(stock.code)
+            record = MentionRecord(
+                message_id=message_id,
+                stock_code=stock.code,
+                stock_name=stock.name,
+                match_type=match_type,
+                sender=sender,
+                message_content=content,
+                send_time=send_time,
+                group_name=group_name,
+            )
+            records.append(record)
 
         if records:
             logger.debug(
@@ -178,6 +216,12 @@ class Matcher:
 
                 # 严格边界判断
                 if self._check_boundary(text, pos, end):
+                    # 黑名单过滤：检查匹配到的名称在上下文中是否命中黑名单
+                    if self._check_blacklist(text, pos, end, name):
+                        logger.debug(f"黑名单过滤: '{name}'在消息中命中黑名单，跳过")
+                        start = end
+                        continue
+
                     matches.append((stock, "name"))
                     # 记录匹配位置
                     for i in range(pos, end):
@@ -214,7 +258,7 @@ class Matcher:
         检查名称匹配的边界条件
 
         名称前后必须是：消息首尾、标点、空格、换行、数字
-        名称后面可以是：上下文后缀词（如"合资"、"科技"、"涨停"等）
+        名称后面可以是：上下文后缀词、常见中文动词/副词/助词
         """
         # 检查前一个字符
         if start > 0:
@@ -231,9 +275,51 @@ class Matcher:
                 # 检查后面是否紧跟上下文后缀词
                 remaining = text[end:]
                 if not any(remaining.startswith(suffix) for suffix in self.CONTEXT_SUFFIX_WORDS):
-                    return False
+                    # 检查后一个字符是否为常见中文动词/副词/助词
+                    # 例如："美利信已经走出了趋势" → "已"在CHINESE_VERB_PARTICLES中 → 有效
+                    if next_char not in self.CHINESE_VERB_PARTICLES:
+                        return False
 
         return True
+
+    def _check_blacklist(self, text: str, start: int, end: int, name: str) -> bool:
+        """
+        检查名称匹配是否命中黑名单
+
+        当股票名称在消息中的上下文（名称+后续文字）构成黑名单中的混淆词组时，
+        该匹配应被过滤。
+
+        例如：消息"平安夜快乐"中匹配到"平安"，"平安"+"夜"构成"平安夜"命中黑名单→过滤
+
+        Args:
+            text: 消息文本
+            start: 名称在文本中的起始位置
+            end: 名称在文本中的结束位置
+            name: 股票名称
+
+        Returns:
+            True表示命中黑名单应过滤，False表示未命中可保留
+        """
+        if not self.blacklist:
+            return False
+
+        # 查找该名称对应的黑名单词组
+        blacklist_words = self.blacklist.get(name)
+        if not blacklist_words:
+            return False
+
+        # 提取名称在消息中的上下文：从名称起始位置向后扩展
+        # 取名称后面足够长的文字来检查是否构成黑名单词组
+        max_blacklist_len = max(len(w) for w in blacklist_words) if blacklist_words else 0
+        context_end = min(end + max_blacklist_len, len(text))
+        context = text[start:context_end]
+
+        # 检查上下文是否以某个黑名单词组开头
+        for word in blacklist_words:
+            if context.startswith(word):
+                return True
+
+        return False
 
     def _check_code_boundary(self, text: str, start: int, end: int) -> bool:
         """

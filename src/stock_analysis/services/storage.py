@@ -58,6 +58,12 @@ class StorageService:
             ON stock_mentions(message_id)
         """)
 
+        # 全局去重索引：消息内容+股票代码组合
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_content_code
+            ON stock_mentions(message_content, stock_code)
+        """)
+
         # 记录处理进度的表
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS process_log (
@@ -93,8 +99,18 @@ class StorageService:
         cursor = conn.cursor()
 
         saved_count = 0
+        skipped_count = 0
         for m in mentions:
             try:
+                # 全局去重：相同消息内容+相同股票代码，只保存一次
+                cursor.execute("""
+                    SELECT COUNT(*) FROM stock_mentions
+                    WHERE message_content = ? AND stock_code = ?
+                """, (m.message_content, m.stock_code))
+                if cursor.fetchone()[0] > 0:
+                    skipped_count += 1
+                    continue
+
                 cursor.execute("""
                     INSERT INTO stock_mentions
                     (message_id, stock_code, stock_name, match_type,
@@ -107,6 +123,9 @@ class StorageService:
                 saved_count += 1
             except Exception as e:
                 logger.error(f"保存提及记录失败: {e}, message_id={m.message_id}")
+
+        if skipped_count > 0:
+            logger.info(f"全局去重跳过{skipped_count}条重复提及记录")
 
         # 记录处理日志
         last_msg_id = max((m.message_id for m in mentions), default=0)

@@ -20,7 +20,7 @@ API_HOST = "0.0.0.0"
 API_PORT = 8000
 
 # 增量更新间隔（秒）
-INCREMENTAL_UPDATE_INTERVAL = 10  # 10秒（接近实时）
+INCREMENTAL_UPDATE_INTERVAL = 60  # 60秒（避免频繁刷新导致卡顿）
 
 # A股数据过滤规则
 EXCLUDE_NAME_PATTERNS = ["指数", "退市"]
@@ -30,5 +30,8 @@ EXCLUDE_NAME_PATTERNS = ["指数", "退市"]
 ENCRYPTED_DATA_MIN_LENGTH = 100
 # XML消息特征
 XML_START_MARKERS = ["<?xml", "<msg>", "<appmsg"]
+# 黑名单配置文件路径
+BLACKLIST_PATH = Path(__file__).parent / "blacklist.json"
+
 # 发送人前缀正则（如 "leijian8981:\n"）
 SENDER_PREFIX_PATTERN = r"^[a-zA-Z0-9_]+:\n"

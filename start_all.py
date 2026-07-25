@@ -24,7 +24,7 @@ PROJECT_ROOT = Path(__file__).parent
 
 def start_wechat_monitor():
     """启动微信监控子进程"""
-    monitor_script = PROJECT_ROOT / "src" / "main_exe.py"
+    monitor_script = PROJECT_ROOT / "src" / "simple_monitor.py"
     if not monitor_script.exists():
         print(f"[错误] 微信监控脚本不存在: {monitor_script}")
         return None

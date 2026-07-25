@@ -2,7 +2,7 @@
 """
 终端看板模块
 在终端以三列（日/周/月）表格形式实时展示股票提及统计数据
-30秒自动刷新，支持键盘交互：R=手动刷新，M=月份选择，Q=退出
+60秒自动刷新，支持键盘交互：R=手动刷新，M=月份选择，Q=退出
 """
 import os
 import sys
@@ -25,7 +25,7 @@ if sys.platform == 'win32':
 logger = logging.getLogger(__name__)
 
 # 看板刷新间隔（秒）
-DASHBOARD_REFRESH_INTERVAL = 10  # 10秒（与增量更新同步）
+DASHBOARD_REFRESH_INTERVAL = 60  # 60秒（避免频繁刷新导致卡顿）
 
 # API基础URL
 API_BASE = "http://localhost:8000"
@@ -165,7 +165,7 @@ def render_dashboard(refresh_msg: str = "", month_label: str = ""):
     lines.append("+" + "-" * 62 + "+")
 
     # 操作提示（始终显示快捷键）
-    lines.append("|  [R]刷新 [M]月份 [Q]退出  10秒自动刷新")
+    lines.append("|  [R]刷新 [M]月份 [Q]退出  60秒自动刷新")
 
     # 刷新结果消息（在快捷键下方单独一行）
     if refresh_msg:
@@ -363,7 +363,7 @@ def dashboard_loop(stop_event: threading.Event):
                 break
             time.sleep(0.5)
         else:
-            # 正常30秒到，自动刷新
+            # 正常60秒到，自动刷新
             continue
 
         if stop_event.is_set():
