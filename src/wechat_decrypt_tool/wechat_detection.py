@@ -6,6 +6,7 @@
 
 import os
 import re
+import logging
 import psutil
 import ctypes
 from pathlib import Path
@@ -14,6 +15,8 @@ from ctypes import wintypes
 from datetime import datetime
 
 from .database_filters import should_skip_source_database
+
+logger = logging.getLogger(__name__)
 
 
 COMMON_WECHAT_PATTERNS = [
@@ -226,7 +229,7 @@ def parse_global_config(base_path: str) -> dict:
             }
         return None
     except Exception as e:
-        print(f"[DEBUG] 解析 global_config 失败: {e}")
+        logger.debug(f"解析 global_config 失败: {e}")
         return None
 
 
@@ -416,7 +419,7 @@ def auto_detect_wechat_data_dirs():
         scan_name = os.path.basename(os.path.normpath(scan_path))
         if _is_wechat_dir_candidate_name(scan_name) and has_wxid_directories(scan_path):
             _append_detected_dir(detected_dirs, scan_path)
-            print(f"[DEBUG] 目录扫描检测成功: {scan_path}")
+            logger.debug(f"目录扫描检测成功: {scan_path}")
 
         for item_name, item_path in _safe_iter_subdirs(scan_path):
             if not _is_wechat_dir_candidate_name(item_name):
@@ -424,7 +427,7 @@ def auto_detect_wechat_data_dirs():
             if not has_wxid_directories(item_path):
                 continue
             _append_detected_dir(detected_dirs, item_path)
-            print(f"[DEBUG] 目录扫描检测成功: {item_path}")
+            logger.debug(f"目录扫描检测成功: {item_path}")
 
     # 策略2：进程内存分析（简化版）
     try:
@@ -452,7 +455,7 @@ def auto_detect_wechat_data_dirs():
                             potential_dir = os.path.join(parent_dir, pattern)
                             if os.path.exists(potential_dir) and has_wxid_directories(potential_dir):
                                 _append_detected_dir(detected_dirs, potential_dir)
-                                print(f"[DEBUG] 进程分析检测成功: {potential_dir}")
+                                logger.debug(f"进程分析检测成功: {potential_dir}")
                 except:
                     pass
     except:
@@ -496,12 +499,12 @@ def get_wx_dir_by_reg(wxid="all"):
     detected_dirs = auto_detect_wechat_data_dirs()
 
     if not detected_dirs:
-        print(f"[DEBUG] 未检测到任何微信数据目录")
+        logger.debug(f"未检测到任何微信数据目录")
         return None
 
     # 返回第一个检测到的目录
     wx_dir = detected_dirs[0]
-    print(f"[DEBUG] 使用检测到的微信目录: {wx_dir}")
+    logger.debug(f"使用检测到的微信目录: {wx_dir}")
 
     # 如果指定了具体的wxid，返回wxid目录
     if wxid and wxid != "all":
@@ -1019,10 +1022,10 @@ def detect_current_logged_in_account(base_path: str = None) -> Dict[str, Any]:
 
     login_dir = None
     for path in possible_login_paths:
-        print(f"[DEBUG] 检查路径: {path}")
+        logger.debug(f"检查路径: {path}")
         if os.path.exists(path):
             login_dir = path
-            print(f"[DEBUG] 找到登录目录: {login_dir}")
+            logger.debug(f"找到登录目录: {login_dir}")
             break
 
     if not login_dir:
@@ -1035,18 +1038,18 @@ def detect_current_logged_in_account(base_path: str = None) -> Dict[str, Any]:
     try:
         # 遍历登录目录下的所有账号文件夹
         items = os.listdir(login_dir)
-        print(f"[DEBUG] 登录目录内容: {items}")
+        logger.debug(f"登录目录内容: {items}")
 
         for item in items:
             item_path = os.path.join(login_dir, item)
-            print(f"[DEBUG] 检查项目: {item}, 路径: {item_path}, 是否为目录: {os.path.isdir(item_path)}")
+            logger.debug(f"检查项目: {item}, 路径: {item_path}, 是否为目录: {os.path.isdir(item_path)}")
 
             if not os.path.isdir(item_path):
                 continue
 
             # 检查key_info.db文件
             key_info_path = os.path.join(item_path, "key_info.db")
-            print(f"[DEBUG] 检查key_info.db文件: {key_info_path}, 是否存在: {os.path.exists(key_info_path)}")
+            logger.debug(f"检查key_info.db文件: {key_info_path}, 是否存在: {os.path.exists(key_info_path)}")
 
             if not os.path.exists(key_info_path):
                 continue
@@ -1055,20 +1058,20 @@ def detect_current_logged_in_account(base_path: str = None) -> Dict[str, Any]:
             try:
                 file_time = os.path.getmtime(key_info_path)
                 file_datetime = datetime.fromtimestamp(file_time)
-                print(f"[DEBUG] 找到key_info.db文件: {key_info_path}, 修改时间: {file_datetime}")
+                logger.debug(f"找到key_info.db文件: {key_info_path}, 修改时间: {file_datetime}")
 
                 # 更新最新登录的账号
                 if latest_time is None or file_time > latest_time:
                     latest_time = file_time
                     current_account = item
-                    print(f"[DEBUG] 更新最新登录账号: {current_account}, 时间: {file_datetime}")
+                    logger.debug(f"更新最新登录账号: {current_account}, 时间: {file_datetime}")
 
             except OSError as e:
-                print(f"[DEBUG] 无法获取文件时间: {key_info_path}, 错误: {e}")
+                logger.debug(f"无法获取文件时间: {key_info_path}, 错误: {e}")
                 continue
 
     except (PermissionError, OSError) as e:
-        print(f"[DEBUG] 无法访问登录目录: {login_dir}, 错误: {e}")
+        logger.debug(f"无法访问登录目录: {login_dir}, 错误: {e}")
         return {
             "current_account": None,
             "latest_time": None,
@@ -1076,7 +1079,7 @@ def detect_current_logged_in_account(base_path: str = None) -> Dict[str, Any]:
         }
 
     if current_account:
-        print(f"[DEBUG] 最终结果: 当前登录账号 {current_account}, 时间 {latest_time}")
+        logger.debug(f"最终结果: 当前登录账号 {current_account}, 时间 {latest_time}")
         return {
             "current_account": current_account,
             "latest_time": latest_time,
@@ -1084,7 +1087,7 @@ def detect_current_logged_in_account(base_path: str = None) -> Dict[str, Any]:
             "message": f"检测到当前登录账号: {current_account}"
         }
     else:
-        print(f"[DEBUG] 最终结果: 未检测到当前登录账号")
+        logger.debug(f"最终结果: 未检测到当前登录账号")
         return {
             "current_account": None,
             "latest_time": None,

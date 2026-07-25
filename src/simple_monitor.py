@@ -1217,6 +1217,14 @@ class SimpleMonitor:
 
             if history_saved > 0:
                 print(f"  [OK] 已保存 {history_saved} 条历史消息到数据库")
+                # 触发看板刷新，让股票分析尽快处理历史消息
+                try:
+                    from stock_analysis.dashboard import get_dashboard
+                    dashboard = get_dashboard()
+                    if dashboard:
+                        dashboard.trigger_refresh()
+                except Exception:
+                    pass
                 print()
 
             # 更新最新消息时间戳
@@ -1314,9 +1322,15 @@ class SimpleMonitor:
                                 continue
 
                             time_str = datetime.fromtimestamp(msg_time_int).strftime('%H:%M:%S')
-                            # 显示完整消息内容（不截断）
-                            print(f"  [{time_str}] {sender}: {content}", flush=True)
-                            print()  # 消息之间空一行
+                            # 显示完整消息内容（使用输出锁防止与看板刷新冲突）
+                            try:
+                                from stock_analysis.dashboard import get_output_lock
+                                with get_output_lock():
+                                    print(f"  [{time_str}] {sender}: {content}", flush=True)
+                                    print()  # 消息之间空一行
+                            except ImportError:
+                                print(f"  [{time_str}] {sender}: {content}", flush=True)
+                                print()
 
                             # 保存到数据库
                             try:
@@ -1329,6 +1343,14 @@ class SimpleMonitor:
                                     sender_id=sender_wxid
                                 )
                                 saved_count += 1
+                                # 通知看板刷新（增量匹配+重新渲染）
+                                try:
+                                    from stock_analysis.dashboard import get_dashboard
+                                    _dash = get_dashboard()
+                                    if _dash and hasattr(_dash, 'trigger_refresh'):
+                                        _dash.trigger_refresh()
+                                except Exception:
+                                    pass
                             except Exception as e:
                                 logger.warning(f"[监控] 保存消息失败: {e}")
                 else:
@@ -1343,6 +1365,15 @@ class SimpleMonitor:
             print(f'[统计] 轮询次数: {poll_count}, 最终间隔: {current_interval:.1f}秒')
             if saved_count > 0:
                 print(f'[已保存 {saved_count} 条消息到数据库]')
+
+                # 触发看板刷新（通知dashboard线程重新渲染）
+                try:
+                    from stock_analysis.dashboard import get_dashboard
+                    dashboard = get_dashboard()
+                    if dashboard and hasattr(dashboard, 'trigger_refresh'):
+                        dashboard.trigger_refresh()
+                except Exception:
+                    pass  # 看板刷新失败不影响主流程
 
     def _get_messages_static(self, group_id: str, limit: int = 30) -> list:
         """使用静态解密方式获取消息

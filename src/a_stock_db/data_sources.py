@@ -45,7 +45,7 @@ class DataSourceBase:
         raise NotImplementedError
     
     def _is_valid_stock(self, code: str) -> bool:
-        """判断是否为有效股票（沪深主板、创业板、科创板）"""
+        """判断是否为有效股票（沪深主板、创业板、科创板、ETF）"""
         if not code:
             return False
         
@@ -60,6 +60,12 @@ class DataSourceBase:
             return True
         # 科创板: 68xxxx
         if code.startswith('68') and len(code) == 6:
+            return True
+        # 沪市ETF: 51xxxx, 56xxxx, 58xxxx
+        if code.startswith(('51', '56', '58')) and len(code) == 6:
+            return True
+        # 深市ETF: 15xxxx, 16xxxx
+        if code.startswith(('15', '16')) and len(code) == 6:
             return True
         
         return False

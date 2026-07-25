@@ -19,7 +19,6 @@ from .services.matcher import Matcher
 from .services.statistics import StatisticsService
 from .services.storage import StorageService
 from .api.routes import router, init_services
-from .dashboard import start_dashboard_thread
 
 # 全局服务实例
 stock_loader = StockLoader()
@@ -100,8 +99,8 @@ def update_stock_db_and_reload() -> dict:
     
     try:
         # 1. 调用模块2的数据源管理器获取最新数据
-        from ..a_stock_db.data_sources import DataSourceManager
-        from ..a_stock_db.database import AStockDatabase
+        from a_stock_db.data_sources import DataSourceManager
+        from a_stock_db.database import AStockDatabase
         
         manager = DataSourceManager()
         result = manager.fetch_with_fallback()
@@ -197,27 +196,24 @@ async def lifespan(app: FastAPI):
     logger.info("模块3 数据分析服务启动中...")
     logger.info("=" * 60)
 
-    # 启动时全量匹配
+    # 启动时尝试全量匹配（可能因模块1尚未准备好而失败，降级处理）
     try:
         result = run_full_match()
         logger.info(f"启动全量匹配结果: {result}")
     except Exception as e:
-        logger.error(f"启动全量匹配失败: {e}")
+        logger.warning(f"启动全量匹配失败（模块1可能尚未准备好）: {e}")
+        logger.warning("将在定时增量更新中自动重试")
 
     # 启动定时增量更新
     task = asyncio.create_task(periodic_incremental_update())
     logger.info(f"定时增量更新已启动，间隔{INCREMENTAL_UPDATE_INTERVAL}秒")
 
-    # 启动终端看板（独立线程，在PowerShell中显示）
-    dashboard_thread = start_dashboard_thread()
-    logger.info("终端看板已启动（独立线程），10秒刷新间隔")
+    # 注意：终端看板由src/main.py统一启动，此处不再重复启动
 
     yield
 
-    # 关闭时取消定时任务和看板线程
+    # 关闭时取消定时任务
     task.cancel()
-    if dashboard_thread and dashboard_thread.is_alive():
-        dashboard_thread.join(timeout=3)
     logger.info("模块3 数据分析服务已停止")
 
 

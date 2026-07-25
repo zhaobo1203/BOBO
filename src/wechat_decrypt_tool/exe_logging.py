@@ -158,10 +158,10 @@ class LogManager:
         ))
         json_handler.setLevel(logging.DEBUG)
 
-        # 控制台处理器（INFO及以上）
+        # 控制台处理器（ERROR及以上，WARNING及以下只写文件避免干扰终端显示）
         console_handler = logging.StreamHandler(sys.stdout)
         console_handler.setFormatter(console_format)
-        console_handler.setLevel(logging.INFO)
+        console_handler.setLevel(logging.ERROR)
 
         # 配置根日志器
         root_logger.setLevel(logging.DEBUG)

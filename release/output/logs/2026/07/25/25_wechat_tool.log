@@ -1,0 +1,6 @@
+2026-07-25 22:42:17 | INFO | wechat_decrypt_tool.logging_config | ============================================================
+2026-07-25 22:42:17 | INFO | wechat_decrypt_tool.logging_config | 微信解密工具日志系统初始化完成
+2026-07-25 22:42:17 | INFO | wechat_decrypt_tool.logging_config | 日志文件: E:\code2\WeChatDataAnalysis\release\output\logs\2026\07\25\25_wechat_tool.log
+2026-07-25 22:42:17 | INFO | wechat_decrypt_tool.logging_config | 日志级别: DEBUG
+2026-07-25 22:42:17 | INFO | wechat_decrypt_tool.logging_config | ============================================================
+2026-07-25 22:42:17 | INFO | stock_analysis.dashboard | 终端看板线程启动
