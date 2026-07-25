@@ -86,6 +86,67 @@ def run_full_match() -> dict:
     return result
 
 
+def update_stock_db_and_reload() -> dict:
+    """
+    更新A股数据库并重新加载匹配引擎索引
+    端到端流程：模块2更新数据 → 模块3重新加载索引
+    
+    Returns:
+        更新结果字典
+    """
+    global matcher
+    logger = logging.getLogger(__name__)
+    logger.info("开始更新A股数据库...")
+    
+    try:
+        # 1. 调用模块2的数据源管理器获取最新数据
+        from ..a_stock_db.data_sources import DataSourceManager
+        from ..a_stock_db.database import AStockDatabase
+        
+        manager = DataSourceManager()
+        result = manager.fetch_with_fallback()
+        
+        if not result.success:
+            logger.error(f"A股数据获取失败: {result.error_message}")
+            return {
+                "status": "error",
+                "message": f"A股数据获取失败: {result.error_message}",
+            }
+        
+        # 2. 更新数据库
+        db = AStockDatabase()
+        stocks_data = [(s.code, s.name) for s in result.stocks]
+        db_stats = db.update_stocks(stocks_data, source=result.source if hasattr(result, 'source') else "unknown")
+        
+        logger.info(f"A股数据库更新完成: 获取{result.count}只, 耗时{result.elapsed_time:.1f}秒")
+        
+        # 3. 重新加载匹配引擎索引
+        old_count, new_count = stock_loader.reload()
+        
+        # 4. 重建匹配引擎
+        matcher = Matcher(
+            name_index=stock_loader.get_name_index(),
+            code_index=stock_loader.get_code_index(),
+        )
+        
+        logger.info(f"匹配引擎索引已重新加载: {old_count}→{new_count}只")
+        
+        return {
+            "status": "ok",
+            "old_count": old_count,
+            "new_count": new_count,
+            "fetched_count": result.count,
+            "elapsed_time": round(result.elapsed_time, 1),
+        }
+        
+    except Exception as e:
+        logger.error(f"A股数据更新失败: {e}")
+        return {
+            "status": "error",
+            "message": f"更新失败: {str(e)}",
+        }
+
+
 def run_incremental_match() -> dict:
     """执行增量匹配"""
     global matcher

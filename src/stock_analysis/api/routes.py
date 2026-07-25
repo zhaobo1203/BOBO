@@ -97,6 +97,25 @@ def incremental_refresh_data():
     return {"status": "ok", "message": "增量刷新完成", "details": result}
 
 
+@router.post("/update-stock-db")
+def update_stock_db():
+    """更新A股数据库并重新加载匹配引擎索引（模块2→模块3联动）"""
+    from ..main import update_stock_db_and_reload
+    result = update_stock_db_and_reload()
+    if result.get("status") == "ok":
+        return {
+            "status": "ok",
+            "message": f"A股数据已更新，索引已重新加载（{result['old_count']}→{result['new_count']}只）",
+            "details": result,
+        }
+    else:
+        return {
+            "status": "error",
+            "message": result.get("message", "更新失败"),
+            "details": result,
+        }
+
+
 @router.get("/health")
 def health_check():
     """健康检查"""

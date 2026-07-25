@@ -23,30 +23,34 @@ CONTEXT_SUFFIX_WORDS = [
     "评级", "目标价", "市盈率", "市净率", "净利润", "营收",
 ]
 
-# 新增：中文常见动词/副词/助词
+# 中文常见动词/副词/助词（与matcher.py同步）
 CHINESE_VERB_PARTICLES = set(
+    # 助词/语气词
+    "了着过地得呢吗吧啊呀嘛"
+    # 副词/连词
     "已经也已正在将将要会能不能得可以可"
     "还还有又却但而且或者与及和跟比较更"
     "最就才只是到从被把给让向对于按"
-    "了着过地得呢吗吧啊呀嘛"
+    # 财经新闻常见动词
+    "披发布宣告称说表显提涨跌停收开"
+    "完该此其每各另再因如若则虽"
+    "进成获受持买卖换操盘拉砸冲破"
+    "创超达占涵盖包扩预估计测算"
+    "在是于为与由以据依经通借"
 )
 
 def check_boundary(text, start, end):
-    """检查名称匹配的边界条件（修复后）"""
-    # 检查前一个字符
+    """检查名称匹配的边界条件"""
     if start > 0:
         prev_char = text[start - 1]
         if prev_char not in BOUNDARY_CHARS and not prev_char.isdigit():
             return False, f"前字符'{prev_char}'不是边界/数字"
 
-    # 检查后一个字符或后缀词
     if end < len(text):
         next_char = text[end]
         if next_char not in BOUNDARY_CHARS and not next_char.isdigit():
-            # 检查后面是否紧跟上下文后缀词
             remaining = text[end:]
             if not any(remaining.startswith(suffix) for suffix in CONTEXT_SUFFIX_WORDS):
-                # 新增：检查后一个字符是否为常见中文动词/副词/助词
                 if next_char not in CHINESE_VERB_PARTICLES:
                     return False, f"后字符'{next_char}'不是边界/数字/后缀词/动词助词"
 
@@ -82,6 +86,13 @@ test_cases = [
     ("美利信", "美利信已经走出了趋势"),
     ("华微电子", "华微电子也走出了趋势"),
     ("大元泵业", "大元泵业，汉中精机"),
+    # 新增：民德电子动词边界测试
+    ("民德电子", "民德电子披露投资者关系活动记录表"),
+    ("民德电子", "2026年7月5日，民德电子披露投资者关系"),
+    ("民德电子", "民德电子发布涨价函"),
+    ("民德电子", "民德电子宣布涨价"),
+    ("民德电子", "民德电子涨停"),
+    ("民德电子", "民德电子跌停"),
 ]
 
 for name, text in test_cases:

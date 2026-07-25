@@ -5,6 +5,7 @@
 import re
 import json
 import logging
+import unicodedata
 from typing import List, Tuple, Optional, Dict
 
 from ..config.settings import (
@@ -41,13 +42,33 @@ class Matcher:
         "评级", "目标价", "市盈率", "市净率", "净利润", "营收",
     ]
 
+    # 中文常见前缀词：股票名称前紧跟这些词时视为有效边界
+    # 例如："三个美利信" → "个"在此列表中 → 有效匹配
+    # 例如："专栏美利信" → "栏"在此列表中 → 有效匹配
+    CHINESE_PREFIX_WORDS = set(
+        # 量词
+        "个只手股份笔项家次条块段节批组类种场"
+        # 名词性前缀（专栏、板块等）
+        "栏版块区层篇集期轮项"
+    )
+
     # 中文常见动词/副词/助词：股票名称后紧跟这些词时视为有效边界
     # 例如："美利信已经走出了趋势" → "已"在此列表中 → 有效匹配
+    # 例如："民德电子披露投资者关系" → "披"在此列表中 → 有效匹配
     CHINESE_VERB_PARTICLES = set(
+        # 助词/语气词
+        "了着过地得呢吗吧啊呀嘛"
+        # 副词/连词
         "已经也已正在将将要会能不能得可以可"
         "还还有又却但而且或者与及和跟比较更"
         "最就才只是到从被把给让向对于按"
-        "了着过地得呢吗吧啊呀嘛"
+        # 财经新闻常见动词（股票名称后紧跟这些动词构成主谓结构，应视为有效匹配）
+        "披发布宣告称说表显提涨跌停收开"
+        "完该此其每各另再因如若则虽"
+        "进成获受持买卖换操盘拉砸冲破"
+        "创超达占涵盖包扩预估计测算"
+        "在是于为与由以据依经通借"
+        "更被将"
     )
 
     # 6位股票代码正则
@@ -265,7 +286,14 @@ class Matcher:
             prev_char = text[start - 1]
             # 前面可以是标点、空格、换行、数字
             if prev_char not in self.BOUNDARY_CHARS and not prev_char.isdigit():
-                return False
+                # 检查前一个字符是否为常见前缀词（量词、名词性前缀等）
+                # 例如："三个美利信" → "个"在CHINESE_PREFIX_WORDS中 → 有效
+                # 例如："专栏美利信" → "栏"在CHINESE_PREFIX_WORDS中 → 有效
+                if prev_char not in self.CHINESE_PREFIX_WORDS:
+                    # 检查前一个字符是否为emoji或Unicode符号
+                    # 例如："🍁美利信更新" → 🍁是emoji → 有效边界
+                    if not self._is_unicode_symbol(prev_char):
+                        return False
 
         # 检查后一个字符或后缀词
         if end < len(text):
@@ -319,6 +347,37 @@ class Matcher:
             if context.startswith(word):
                 return True
 
+        return False
+
+    @staticmethod
+    def _is_unicode_symbol(char: str) -> bool:
+        """
+        判断字符是否为Unicode符号/emoji
+
+        包括emoji、特殊符号、货币符号等，这些字符作为股票名称的前边界是合法的。
+
+        Args:
+            char: 单个字符
+
+        Returns:
+            True表示是Unicode符号/emoji
+        """
+        try:
+            category = unicodedata.category(char)
+            # So: 其他符号（含emoji）, Sk: 修饰符号, Sm: 数学符号, Sc: 货币符号
+            if category in ('So', 'Sk', 'Sm', 'Sc'):
+                return True
+            # 补充：检查是否为emoji范围（部分emoji的category是So，但有些不是）
+            cp = ord(char)
+            # Emoji范围：U+1F300-U+1F9FF, U+2600-U+26FF, U+2700-U+27BF, U+FE00-U+FE0F
+            if (0x1F300 <= cp <= 0x1F9FF or
+                0x2600 <= cp <= 0x27BF or
+                0xFE00 <= cp <= 0xFE0F or
+                0x1FA00 <= cp <= 0x1FA6F or
+                0x1FA70 <= cp <= 0x1FAFF):
+                return True
+        except (ValueError, TypeError):
+            pass
         return False
 
     def _check_code_boundary(self, text: str, start: int, end: int) -> bool:

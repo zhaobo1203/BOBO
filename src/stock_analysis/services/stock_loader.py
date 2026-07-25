@@ -102,3 +102,20 @@ class StockLoader:
         if not self._loaded:
             self.load()
         return self._code_index
+
+    def reload(self) -> tuple:
+        """
+        重新加载A股数据（用于数据更新后刷新索引）
+        
+        Returns:
+            (old_count, new_count) 旧数量和新数量
+        """
+        old_count = len(self._stocks)
+        self._loaded = False
+        self._stocks = []
+        self._name_index = {}
+        self._code_index = {}
+        self.load()
+        new_count = len(self._stocks)
+        logger.info(f"A股数据重新加载完成: {old_count}→{new_count}只")
+        return (old_count, new_count)

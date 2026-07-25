@@ -2,7 +2,7 @@
 """
 终端看板模块
 在终端以三列（日/周/月）表格形式实时展示股票提及统计数据
-60秒自动刷新，支持键盘交互：R=手动刷新，M=月份选择，Q=退出
+60秒自动刷新，支持键盘交互：R=手动刷新，M=月份选择，U=更新A股数据，Q=退出
 """
 import os
 import sys
@@ -167,6 +167,9 @@ def render_dashboard(refresh_msg: str = "", month_label: str = ""):
     # 操作提示（始终显示快捷键）
     lines.append("|  [R]刷新 [M]月份 [Q]退出  60秒自动刷新")
 
+    # U键操作提示（单独一行）
+    lines.append("|  [U] 更新A股数据库并重新加载索引")
+
     # 刷新结果消息（在快捷键下方单独一行）
     if refresh_msg:
         lines.append(f"|  {refresh_msg:<60}|")
@@ -189,6 +192,31 @@ def do_incremental_refresh() -> str:
         return f"增量刷新完成: {new_msgs}条新消息, {new_mentions}条新提及"
     else:
         return "刷新请求失败，请检查API服务"
+
+
+def do_update_stock_db() -> str:
+    """执行A股数据库更新并重新加载索引，返回结果消息"""
+    # 先显示等待提示
+    clear_screen()
+    print("\n  ⏳ 正在更新A股数据...")
+    sys.stdout.flush()
+    
+    # 调用API更新（超时设为120秒，网络拉取可能较慢）
+    try:
+        url = f"{API_BASE}/api/update-stock-db"
+        req = Request(url, method="POST")
+        with urlopen(req, timeout=120) as resp:
+            result = json.loads(resp.read().decode('utf-8'))
+    except Exception as e:
+        logger.error(f"A股数据更新请求失败: {e}")
+        return f"❌ A股数据更新失败: {str(e)[:40]}"
+    
+    if result and result.get('status') == 'ok':
+        msg = result.get('message', '')
+        return f"✅ {msg}"
+    else:
+        error_msg = result.get('message', '未知错误') if result else 'API无响应'
+        return f"❌ {error_msg[:50]}"
 
 
 def show_month_selector() -> tuple:
@@ -255,11 +283,12 @@ def show_month_selector() -> tuple:
 
 
 def keyboard_listener(stop_event: threading.Event, refresh_event: threading.Event,
-                      month_event: threading.Event):
+                      month_event: threading.Event, update_event: threading.Event):
     """
     键盘监听线程
     R = 手动刷新（触发增量更新+看板刷新）
     M = 月份选择
+    U = 更新A股数据库并重新加载索引
     Q = 退出
     """
     if sys.platform == 'win32':
@@ -273,6 +302,9 @@ def keyboard_listener(stop_event: threading.Event, refresh_event: threading.Even
                 elif key == 'M':
                     logger.info("用户按M键，触发月份选择")
                     month_event.set()
+                elif key == 'U':
+                    logger.info("用户按U键，触发A股数据更新")
+                    update_event.set()
                 elif key == 'Q':
                     logger.info("用户按Q键，退出看板")
                     stop_event.set()
@@ -289,6 +321,9 @@ def keyboard_listener(stop_event: threading.Event, refresh_event: threading.Even
                 elif key == 'M':
                     logger.info("用户按M键，触发月份选择")
                     month_event.set()
+                elif key == 'U':
+                    logger.info("用户按U键，触发A股数据更新")
+                    update_event.set()
                 elif key == 'Q':
                     logger.info("用户按Q键，退出看板")
                     stop_event.set()
@@ -309,11 +344,12 @@ def dashboard_loop(stop_event: threading.Event):
     # 创建事件
     refresh_event = threading.Event()
     month_event = threading.Event()
+    update_event = threading.Event()
 
     # 启动键盘监听线程
     kb_thread = threading.Thread(
         target=keyboard_listener,
-        args=(stop_event, refresh_event, month_event),
+        args=(stop_event, refresh_event, month_event, update_event),
         name="keyboard-listener",
         daemon=True,
     )
@@ -360,6 +396,11 @@ def dashboard_loop(stop_event: threading.Event):
                 if result:
                     _selected_year, _selected_month = result
                     month_label = f"已切换到 {_selected_year}年{_selected_month}月"
+                break
+            if update_event.is_set():
+                update_event.clear()
+                # 执行A股数据更新（阻塞等待）
+                refresh_msg = do_update_stock_db()
                 break
             time.sleep(0.5)
         else:

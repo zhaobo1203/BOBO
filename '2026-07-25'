@@ -1,0 +1,5 @@
+Traceback (most recent call last):
+  File "<string>", line 1, in <module>
+    import sqlite3,sys,os; os.system('chcp 65001 >nul 2>&1'); hasattr(sys.stdout,'reconfigure') and sys.stdout.reconfigure(encoding='utf-8',errors='replace'); conn=sqlite3.connect('data/messages.db'); c=conn.cursor(); c.execute("SELECT id, sender, content, send_time FROM group_messages WHERE content LIKE '%民德%' AND send_time  ORDER BY send_time"); rows=c.fetchall(); print(f'7月25日含民德的消息: {len(rows)}条'); [print(f'  id={r[0]} sender={r[1]} time={r[3]} content={r[2][:80]}') for r in rows]; conn.close()
+                                                                                                                                                                                                                          ~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+sqlite3.OperationalError: no such column: sender
