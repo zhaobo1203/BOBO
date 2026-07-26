@@ -307,10 +307,23 @@ class SimpleMonitor:
                 logger.info(f"[步骤3] 提取到的密钥长度: {len(str(db_key)) if db_key else 0}")
                 if db_key and len(str(db_key)) == 64:
                     self.db_key = str(db_key).lower()
-                    self.print_step("密钥获取", "done", "Hook注入成功")
-                    logger.info("[步骤3] Hook注入成功获取密钥")
-                    self._save_key()
-                    return True
+
+                    # 验证密钥是否匹配session.db
+                    print(f"  验证密钥与数据库匹配性...", flush=True)
+                    logger.info("[步骤3] 开始验证密钥与数据库匹配性")
+
+                    if self._verify_key_and_find_matching_db():
+                        self.print_step("密钥获取", "done", "Hook注入成功")
+                        logger.info("[步骤3] Hook注入成功获取密钥（已验证匹配）")
+                        self._save_key()
+                        return True
+                    else:
+                        # 密钥不匹配任何session.db，但仍保存密钥，让步骤4尝试
+                        logger.warning("[步骤3] 密钥与所有session.db不匹配，将继续尝试")
+                        print(f"  [!] 密钥与当前数据库不匹配，将在步骤4中重试")
+                        self.print_step("密钥获取", "done", "Hook注入成功（未验证）")
+                        self._save_key()
+                        return True
                 else:
                     logger.warning(f"[步骤3] Hook返回密钥格式无效: len={len(str(db_key)) if db_key else 0}")
                     print(f"  [!] 密钥格式无效，长度: {len(str(db_key)) if db_key else 0}")
@@ -396,6 +409,215 @@ class SimpleMonitor:
         logger.info("[步骤3] 用户手动输入密钥，长度验证通过")
         return cleaned
 
+    def _verify_key_matches_db(self, db_path: str, db_key: str) -> bool:
+        """验证密钥是否匹配数据库（通过Page1 HMAC校验）
+
+        只读取数据库第1页（4096字节），用HMAC校验密钥是否匹配。
+        耗时<1秒，不会修改数据库文件。
+
+        Args:
+            db_path: 数据库文件路径
+            db_key: 64位十六进制密钥字符串
+
+        Returns:
+            True=密钥匹配, False=密钥不匹配
+        """
+        import hashlib
+        import hmac as hmac_mod
+        import struct
+
+        try:
+            PAGE_SIZE = 4096
+            SALT_SIZE = 16
+            IV_SIZE = 16
+            HMAC_SIZE = 64
+            RESERVE_SIZE = IV_SIZE + HMAC_SIZE
+            KEY_SIZE = 32
+
+            # 读取第1页
+            with open(db_path, 'rb') as f:
+                page1 = f.read(PAGE_SIZE)
+
+            if len(page1) < PAGE_SIZE:
+                logger.debug(f"[密钥验证] 文件太小: {len(page1)} bytes")
+                return False
+
+            # 检查是否已经是明文SQLite
+            if page1.startswith(b"SQLite format 3\x00"):
+                logger.debug(f"[密钥验证] 数据库已是明文SQLite，无需密钥")
+                return True
+
+            # 提取salt
+            salt = page1[:SALT_SIZE]
+
+            # 将hex密钥转为bytes
+            key_bytes = bytes.fromhex(db_key)
+
+            # 尝试两种模式：raw enc_key 和 passphrase
+            # 模式1: key是raw enc_key
+            enc_key_1 = key_bytes
+            mac_key_1 = hashlib.pbkdf2_hmac("sha512", enc_key_1, bytes(b ^ 0x3A for b in salt), 2, dklen=KEY_SIZE)
+
+            # 模式2: key是passphrase，需要先derive
+            enc_key_2 = hashlib.pbkdf2_hmac("sha512", key_bytes, salt, 256000, dklen=KEY_SIZE)
+            mac_key_2 = hashlib.pbkdf2_hmac("sha512", enc_key_2, bytes(b ^ 0x3A for b in salt), 2, dklen=KEY_SIZE)
+
+            # 计算Page1的HMAC
+            stored_hmac = page1[PAGE_SIZE - HMAC_SIZE: PAGE_SIZE]
+
+            for mode, mac_key in [("raw_key", mac_key_1), ("passphrase", mac_key_2)]:
+                # 计算期望的HMAC
+                offset = SALT_SIZE  # page1从salt后开始
+                data_end = PAGE_SIZE - RESERVE_SIZE + IV_SIZE
+                mac = hmac_mod.new(mac_key, digestmod=hashlib.sha512)
+                mac.update(page1[offset:data_end])
+                mac.update(struct.pack('<I', 1))  # page number
+                expected_hmac = mac.digest()
+
+                if hmac_mod.compare_digest(stored_hmac, expected_hmac):
+                    logger.info(f"[密钥验证] 密钥匹配数据库: mode={mode}, path={db_path}")
+                    return True
+
+            logger.debug(f"[密钥验证] 密钥不匹配数据库: {db_path}")
+            return False
+
+        except Exception as e:
+            logger.warning(f"[密钥验证] 验证异常: {e}")
+            return False
+
+    def _find_all_session_dbs(self) -> list[str]:
+        """查找所有可能的session.db路径
+
+        使用 rglob 递归搜索所有微信数据目录，覆盖各种目录结构：
+        - xwechat_files/<account>_<suffix>/db_storage/session/session.db
+        - xwechat_files/all_users/login/<account>/...
+        - Weixin/xwechat_files/...
+        - 任意嵌套结构
+
+        Returns:
+            session.db路径列表
+        """
+        from wechat_decrypt_tool.wechat_detection import detect_wechat_installation
+
+        all_paths = []
+
+        def _add_if_new(p: Path):
+            """添加路径到列表（去重）"""
+            s = str(p)
+            if p.exists() and s not in all_paths:
+                all_paths.append(s)
+
+        def _rglob_session_dbs(base_dir: Path):
+            """在目录下递归搜索 session.db"""
+            if not base_dir.exists() or not base_dir.is_dir():
+                return
+            try:
+                for item in base_dir.rglob('session.db'):
+                    # 只保留在 db_storage 或 session 目录下的 session.db
+                    path_str = str(item).lower()
+                    if 'db_storage' in path_str or 'session' in str(item.parent).lower():
+                        _add_if_new(item)
+            except (PermissionError, OSError) as e:
+                logger.debug(f"[session.db搜索] rglob搜索失败: {base_dir}, 错误: {e}")
+
+        # 1. 当前data_path下的session.db（直接路径，优先）
+        if self.data_path:
+            data_path_obj = Path(self.data_path)
+            _add_if_new(data_path_obj / 'db_storage' / 'session' / 'session.db')
+            _add_if_new(data_path_obj / 'db_storage' / 'session.db')
+
+        # 2. 搜索所有微信数据目录（递归）
+        try:
+            detection = detect_wechat_installation()
+            wechat_data_dirs = detection.get('data_dirs', [])
+
+            for data_dir in wechat_data_dirs:
+                data_dir_obj = Path(data_dir)
+                if not data_dir_obj.exists():
+                    continue
+
+                # 递归搜索整个数据目录下的 session.db
+                _rglob_session_dbs(data_dir_obj)
+
+        except Exception as e:
+            logger.warning(f"[session.db搜索] 搜索微信数据目录失败: {e}")
+
+        logger.info(f"[session.db搜索] 找到 {len(all_paths)} 个session.db路径")
+        for p in all_paths:
+            logger.debug(f"[session.db搜索]   - {p}")
+        return all_paths
+
+    def _verify_key_and_find_matching_db(self) -> bool:
+        """验证密钥是否匹配当前session.db，不匹配则搜索其他路径
+
+        包含等待重试机制：Hook获取密钥后，微信可能需要几秒才能用新密钥更新session.db
+
+        Returns:
+            True=找到匹配的数据库, False=未找到
+        """
+        if not self.db_key:
+            return False
+
+        session_db_path = self._find_session_db()
+        if not session_db_path:
+            logger.warning("[密钥验证] 未找到session.db")
+            return False
+
+        # 验证当前session.db
+        if self._verify_key_matches_db(session_db_path, self.db_key):
+            logger.info("[密钥验证] 密钥匹配当前session.db")
+            return True
+
+        logger.warning(f"[密钥验证] 密钥不匹配当前session.db: {session_db_path}")
+        print(f"  [!] 密钥与当前session.db不匹配，搜索其他数据目录...")
+
+        # 搜索所有session.db，找到密钥匹配的
+        all_session_dbs = self._find_all_session_dbs()
+        for db_path in all_session_dbs:
+            if db_path == session_db_path:
+                continue  # 已经验证过
+            logger.info(f"[密钥验证] 尝试: {db_path}")
+            if self._verify_key_matches_db(db_path, self.db_key):
+                logger.info(f"[密钥验证] 找到匹配的session.db: {db_path}")
+                print(f"  [OK] 找到密钥匹配的数据库: {db_path}")
+
+                # 更新data_path为匹配的数据库所在目录
+                # db_path: .../ToweR1989_b2c9/db_storage/session/session.db
+                # data_path应为: .../ToweR1989_b2c9
+                new_data_path = str(Path(db_path).parent.parent.parent)
+                if Path(new_data_path).exists():
+                    logger.info(f"[密钥验证] 更新data_path: {self.data_path} -> {new_data_path}")
+                    self.data_path = new_data_path
+                    return True
+
+        # 所有session.db都不匹配，尝试等待重试
+        # Hook获取密钥后，微信可能需要几秒才能用新密钥更新session.db
+        logger.info("[密钥验证] 首次验证失败，等待5秒后重试...")
+        print(f"  等待微信更新数据库（5秒）...", flush=True)
+        time.sleep(5)
+
+        # 重新验证当前session.db
+        session_db_path = self._find_session_db()
+        if session_db_path and self._verify_key_matches_db(session_db_path, self.db_key):
+            logger.info("[密钥验证] 重试验证成功")
+            return True
+
+        # 重新搜索所有session.db
+        all_session_dbs = self._find_all_session_dbs()
+        for db_path in all_session_dbs:
+            if self._verify_key_matches_db(db_path, self.db_key):
+                logger.info(f"[密钥验证] 重试找到匹配的session.db: {db_path}")
+                print(f"  [OK] 重试找到密钥匹配的数据库: {db_path}")
+                new_data_path = str(Path(db_path).parent.parent.parent)
+                if Path(new_data_path).exists():
+                    logger.info(f"[密钥验证] 更新data_path: {self.data_path} -> {new_data_path}")
+                    self.data_path = new_data_path
+                    return True
+
+        logger.warning("[密钥验证] 所有session.db均不匹配当前密钥")
+        print(f"  [!] 未找到密钥匹配的数据库")
+        return False
+
     def _save_key(self):
         """保存密钥到存储"""
         import json
@@ -438,10 +660,29 @@ class SimpleMonitor:
         print(f"  等待微信初始化完成...")
         time.sleep(3)
 
+        # 在解密前再次验证密钥与数据库匹配性
+        # （步骤3可能验证未通过，此时微信已完全初始化，数据库可能已更新）
         session_db_path = self._find_session_db()
         if not session_db_path:
             self.print_step("数据库连接", "fail", "session.db不存在")
             return False
+
+        # 验证密钥是否匹配当前session.db
+        if not self._verify_key_matches_db(session_db_path, self.db_key):
+            logger.warning("[步骤4] 密钥与当前session.db不匹配，重新搜索匹配的数据库...")
+            print(f"  [!] 密钥与session.db不匹配，重新搜索...")
+
+            if self._verify_key_and_find_matching_db():
+                # 找到了匹配的数据库，重新获取session.db路径
+                session_db_path = self._find_session_db()
+                if not session_db_path:
+                    self.print_step("数据库连接", "fail", "session.db不存在")
+                    return False
+                logger.info(f"[步骤4] 密钥验证通过，使用匹配的数据库: {session_db_path}")
+            else:
+                # 所有session.db都不匹配，仍然尝试解密（可能数据库刚被微信更新）
+                logger.warning("[步骤4] 所有session.db均不匹配密钥，仍将尝试解密")
+                print(f"  [!] 未找到密钥匹配的数据库，仍将尝试解密...")
 
         # 首先尝试静态解密（用于获取群聊列表）
         print(f"  使用静态解密方式...")
