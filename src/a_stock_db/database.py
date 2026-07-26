@@ -13,9 +13,6 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-# 统一排除名称模式（与data_sources.py、stock_loader保持一致）
-EXCLUDE_NAME_PATTERNS = ["指数", "退市"]
-
 # 默认数据库路径
 DEFAULT_DB_DIR = Path(__file__).parent.parent.parent / "data" / "a_stock_db"
 DEFAULT_DB_PATH = DEFAULT_DB_DIR / "a_stock.db"
@@ -132,14 +129,7 @@ class AStockDatabase:
             return cursor.fetchall()
     
     def update_stocks(self, stocks: list[tuple[str, str]], source: str = "unknown") -> DatabaseStats:
-        """更新股票数据（智能增量更新）
-        
-        智能删除策略：
-        - 新增股票：直接INSERT
-        - 已有股票：更新名称（ON CONFLICT DO UPDATE）
-        - 缺失股票（数据库有但新数据没有）：
-          - 名称含"退市"/"指数" → 确认退市/指数，安全删除
-          - 名称正常 → 可能是停牌或数据源遗漏，保留不删除
+        """更新股票数据（增量更新）
         
         Args:
             stocks: 股票列表，每个元素为 (股票代码, 股票名称)
@@ -155,43 +145,10 @@ class AStockDatabase:
             cursor.execute("SELECT code FROM stocks")
             existing_codes = {row[0] for row in cursor.fetchall()}
         
-        # 计算新增和缺失
+        # 计算新增和移除
         new_codes = {code for code, _ in stocks}
         added_codes = new_codes - existing_codes
         removed_codes = existing_codes - new_codes
-        
-        # 智能删除：只删除确认退市/指数的股票
-        safe_removed_codes = set()
-        skipped_removed_codes = set()
-        if removed_codes:
-            # 查询缺失股票在数据库中的名称
-            with sqlite3.connect(self.db_path) as conn:
-                cursor = conn.cursor()
-                placeholders = ','.join('?' * len(removed_codes))
-                cursor.execute(
-                    f"SELECT code, name FROM stocks WHERE code IN ({placeholders})",
-                    list(removed_codes)
-                )
-                for code, name in cursor.fetchall():
-                    should_remove = False
-                    for pattern in EXCLUDE_NAME_PATTERNS:
-                        if pattern in name:
-                            should_remove = True
-                            break
-                    if should_remove:
-                        safe_removed_codes.add(code)
-                    else:
-                        skipped_removed_codes.add(code)
-            
-            if skipped_removed_codes:
-                logger.info(
-                    f"智能删除：保留 {len(skipped_removed_codes)} 只名称正常的缺失股票"
-                    f"（可能是停牌或数据源遗漏，不误删）"
-                )
-            if safe_removed_codes:
-                logger.info(
-                    f"智能删除：确认删除 {len(safe_removed_codes)} 只退市/指数股票"
-                )
         
         # 获取新增的股票信息
         added_stocks = [(code, name) for code, name in stocks if code in added_codes]
@@ -200,11 +157,11 @@ class AStockDatabase:
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
             
-            # 只删除确认退市/指数的股票
-            if safe_removed_codes:
+            # 删除已退市的股票
+            if removed_codes:
                 cursor.executemany(
                     "DELETE FROM stocks WHERE code = ?",
-                    [(code,) for code in safe_removed_codes]
+                    [(code,) for code in removed_codes]
                 )
             
             # 插入新股票（已存在的更新名称）
@@ -217,12 +174,11 @@ class AStockDatabase:
                         updated_at = CURRENT_TIMESTAMP
                 ''', (code, name))
             
-            # 记录更新日志（removed_count只记录实际删除的数量）
-            actual_removed = len(safe_removed_codes)
+            # 记录更新日志
             cursor.execute('''
                 INSERT INTO update_log (total_count, added_count, removed_count, source)
                 VALUES (?, ?, ?, ?)
-            ''', (len(stocks), len(added_codes), actual_removed, source))
+            ''', (len(stocks), len(added_codes), len(removed_codes), source))
             
             conn.commit()
         
@@ -237,7 +193,7 @@ class AStockDatabase:
             total_count=len(stocks),
             last_update_time=last_update_time,
             added_count=len(added_codes),
-            removed_count=actual_removed
+            removed_count=len(removed_codes)
         )
     
     def get_stats(self) -> DatabaseStats:

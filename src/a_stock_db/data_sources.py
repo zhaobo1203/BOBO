@@ -19,9 +19,6 @@ import json
 
 logger = logging.getLogger(__name__)
 
-# 统一排除名称模式（与database.py、stock_loader保持一致）
-EXCLUDE_NAME_PATTERNS = ["指数", "退市"]
-
 
 @dataclass
 class StockInfo:
@@ -47,40 +44,31 @@ class DataSourceBase:
         """获取股票列表"""
         raise NotImplementedError
     
-    def _is_valid_stock(self, code: str, name: str = "") -> bool:
-        """判断是否为有效股票（代码+名称双重过滤）
-        
-        代码过滤：沪深主板、创业板、科创板
-        名称过滤：排除退市股、指数等
-        """
+    def _is_valid_stock(self, code: str) -> bool:
+        """判断是否为有效股票（沪深主板、创业板、科创板、ETF）"""
         if not code:
             return False
         
-        # 代码过滤
-        valid_prefix = False
         # 沪主板: 60xxxx
         if code.startswith('60') and len(code) == 6:
-            valid_prefix = True
-        # 深主板: 00xxxx
-        elif code.startswith('00') and len(code) == 6:
-            valid_prefix = True
+            return True
+        # 深主板: 00xxxx (不含指数)
+        if code.startswith('00') and len(code) == 6:
+            return True
         # 创业板: 30xxxx
-        elif code.startswith('30') and len(code) == 6:
-            valid_prefix = True
+        if code.startswith('30') and len(code) == 6:
+            return True
         # 科创板: 68xxxx
-        elif code.startswith('68') and len(code) == 6:
-            valid_prefix = True
+        if code.startswith('68') and len(code) == 6:
+            return True
+        # 沪市ETF: 51xxxx, 56xxxx, 58xxxx
+        if code.startswith(('51', '56', '58')) and len(code) == 6:
+            return True
+        # 深市ETF: 15xxxx, 16xxxx
+        if code.startswith(('15', '16')) and len(code) == 6:
+            return True
         
-        if not valid_prefix:
-            return False
-        
-        # 名称过滤：排除退市股、指数等
-        if name:
-            for pattern in EXCLUDE_NAME_PATTERNS:
-                if pattern in name:
-                    return False
-        
-        return True
+        return False
 
 
 class SinaFinanceSource(DataSourceBase):
@@ -118,7 +106,7 @@ class SinaFinanceSource(DataSourceBase):
                         for item in data_sh:
                             code = item.get('symbol', '')
                             name = item.get('name', '')
-                            if self._is_valid_stock(code, name):
+                            if self._is_valid_stock(code):
                                 stocks.append(StockInfo(code=code, name=name))
             except Exception as e:
                 logger.warning(f"新浪财经沪市接口失败: {e}")
@@ -142,7 +130,7 @@ class SinaFinanceSource(DataSourceBase):
                         for item in data_sz:
                             code = item.get('symbol', '')
                             name = item.get('name', '')
-                            if self._is_valid_stock(code, name):
+                            if self._is_valid_stock(code):
                                 stocks.append(StockInfo(code=code, name=name))
             except Exception as e:
                 logger.warning(f"新浪财经深市接口失败: {e}")
@@ -216,7 +204,7 @@ class TencentFinanceSource(DataSourceBase):
                         for item in data['data']['diff']:
                             code = item.get('f12', '')
                             name = item.get('f14', '')
-                            if self._is_valid_stock(code, name):
+                            if self._is_valid_stock(code):
                                 stocks.append(StockInfo(code=code, name=name))
             except Exception as e:
                 logger.warning(f"东方财富接口失败: {e}")
@@ -237,7 +225,7 @@ class TencentFinanceSource(DataSourceBase):
                         pattern = r'<td>(\d{6})</td>.*?<td>(.*?)</td>'
                         matches = re.findall(pattern, resp.text, re.DOTALL)
                         for code, name in matches[:100]:  # 限制数量避免过多
-                            if self._is_valid_stock(code, name):
+                            if self._is_valid_stock(code):
                                 stocks.append(StockInfo(code=code.strip(), name=name.strip()))
                 except Exception as e:
                     logger.warning(f"同花顺接口失败: {e}")
@@ -293,7 +281,7 @@ class BaostockSource(DataSourceBase):
                 else:
                     pure_code = code[2:] if len(code) > 6 else code
                 
-                if self._is_valid_stock(pure_code, name):
+                if self._is_valid_stock(pure_code):
                     stocks.append(StockInfo(code=pure_code, name=name))
             
             bs.logout()
@@ -336,7 +324,7 @@ class AKShareSource(DataSourceBase):
                     for _, row in df.iterrows():
                         code = str(row.get('code', '')).strip()
                         name = str(row.get('name', '')).strip()
-                        if self._is_valid_stock(code, name):
+                        if self._is_valid_stock(code):
                             stocks.append(StockInfo(code=code, name=name))
                     logger.info(f"AKShare聚合接口获取 {len(stocks)} 只股票")
             except Exception as e:
@@ -354,7 +342,7 @@ class AKShareSource(DataSourceBase):
                         for _, row in sz_df.iterrows():
                             code = str(row.get('A股代码', '')).strip()
                             name = str(row.get('A股简称', '')).strip()
-                            if self._is_valid_stock(code, name) and code not in seen_codes:
+                            if self._is_valid_stock(code) and code not in seen_codes:
                                 stocks.append(StockInfo(code=code, name=name))
                                 seen_codes.add(code)
                                 sz_count += 1
@@ -370,7 +358,7 @@ class AKShareSource(DataSourceBase):
                         for _, row in sh_df.iterrows():
                             code = str(row.get('证券代码', '')).strip()
                             name = str(row.get('证券简称', '')).strip()
-                            if self._is_valid_stock(code, name) and code not in seen_codes:
+                            if self._is_valid_stock(code) and code not in seen_codes:
                                 stocks.append(StockInfo(code=code, name=name))
                                 seen_codes.add(code)
                                 sh_count += 1
@@ -386,7 +374,7 @@ class AKShareSource(DataSourceBase):
                         for _, row in kcb_df.iterrows():
                             code = str(row.get('证券代码', '')).strip()
                             name = str(row.get('证券简称', '')).strip()
-                            if self._is_valid_stock(code, name) and code not in seen_codes:
+                            if self._is_valid_stock(code) and code not in seen_codes:
                                 stocks.append(StockInfo(code=code, name=name))
                                 seen_codes.add(code)
                                 kcb_count += 1
@@ -432,7 +420,7 @@ class EfinanceSource(DataSourceBase):
                 code = str(row['股票代码']).strip()
                 name = str(row['股票名称']).strip()
                 
-                if self._is_valid_stock(code, name):
+                if self._is_valid_stock(code):
                     stocks.append(StockInfo(code=code, name=name))
             
             elapsed = time.time() - start_time
@@ -478,7 +466,7 @@ class TuShareSource(DataSourceBase):
                 code = str(row['symbol']).strip()
                 name = str(row['name']).strip()
                 
-                if self._is_valid_stock(code, name):
+                if self._is_valid_stock(code):
                     stocks.append(StockInfo(code=code, name=name))
             
             elapsed = time.time() - start_time
@@ -523,7 +511,7 @@ class SinaSpotSource(DataSourceBase):
                 else:
                     code = code_raw
                 
-                if self._is_valid_stock(code, name):
+                if self._is_valid_stock(code):
                     stocks.append(StockInfo(code=code, name=name))
             
             elapsed = time.time() - start_time
