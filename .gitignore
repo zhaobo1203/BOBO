@@ -52,3 +52,11 @@ pnpm-lock.yaml
 
 # Local scratch file accidentally generated during development
 /bento-summary.html
+
+# Release build artifacts (too large for GitHub)
+release/*.exe
+release/logs/
+
+# Log files
+logs/
+*.log
