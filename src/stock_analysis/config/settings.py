@@ -23,7 +23,7 @@ API_PORT = 8000
 INCREMENTAL_UPDATE_INTERVAL = 60  # 60秒（避免频繁刷新导致卡顿）
 
 # A股数据过滤规则
-EXCLUDE_NAME_PATTERNS = ["指数", "退市"]
+EXCLUDE_NAME_PATTERNS = ["指数", "退市", "ST", "*ST"]
 
 # 消息过滤规则
 # 加密数据特征：以十六进制字符开头且长度超过100

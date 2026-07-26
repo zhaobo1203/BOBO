@@ -148,7 +148,16 @@ class AStockDatabase:
         # 计算新增和移除
         new_codes = {code for code, _ in stocks}
         added_codes = new_codes - existing_codes
-        removed_codes = existing_codes - new_codes
+        # 只有数据源返回足够完整时才执行退市删除
+        # 避免小范围数据源误删正常股票（阈值：至少4000只才算完整覆盖）
+        removed_codes = set()
+        if len(stocks) >= 4000:
+            removed_codes = existing_codes - new_codes
+        else:
+            logger.warning(
+                f"数据源返回{len(stocks)}只股票，不足4000只阈值，"
+                f"跳过退市删除以避免误删正常股票"
+            )
         
         # 获取新增的股票信息
         added_stocks = [(code, name) for code, name in stocks if code in added_codes]
