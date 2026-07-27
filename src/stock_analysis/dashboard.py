@@ -37,6 +37,13 @@ logger = logging.getLogger(__name__)
 DASHBOARD_REFRESH_INTERVAL = 120
 API_BASE = "http://localhost:8000"
 
+
+def set_api_base(base_url: str):
+    """动态设置API基础地址（用于端口自动切换时同步更新）"""
+    global API_BASE
+    API_BASE = base_url
+    logger.info(f"看板API地址已更新: {API_BASE}")
+
 _selected_year = None
 _selected_month = None
 _DASHBOARD_LINES = 0

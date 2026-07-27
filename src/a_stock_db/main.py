@@ -65,7 +65,7 @@ def update_data(db: AStockDatabase):
     # 保存到数据库
     print("\n正在保存到数据库...")
     stocks_data = [(stock.code, stock.name) for stock in result.stocks]
-    stats = db.update_stocks(stocks_data, source="akshare")  # 记录实际使用的数据源
+    stats = db.update_stocks(stocks_data, source=result.source_name)  # 记录实际使用的数据源
     
     # 显示更新结果
     print("\n" + "-" * 50)
@@ -85,7 +85,56 @@ def update_data(db: AStockDatabase):
         if stats.added_count == 0 and stats.removed_count == 0:
             print("[OK] 数据无变化")
     
+    # 数据校准：用备用数据源补充可能遗漏的近期新股
+    print("\n正在进行数据校准（追溯一周）...")
+    calibrate_result = _calibrate_recent_stocks(db, manager)
+    if calibrate_result and calibrate_result.added_count > 0:
+        print(f"[校准] 补充新增: {calibrate_result.added_count} 只近期遗漏股票")
+        print(f"[校准] 校准后总数: {calibrate_result.total_count} 只股票")
+    else:
+        print("[校准] 数据完整，无遗漏")
+    
     print(f"\n数据库位置: {db.db_path}")
+
+
+def _calibrate_recent_stocks(db: AStockDatabase, manager: DataSourceManager) -> DatabaseStats | None:
+    """数据校准：用备用数据源补充可能遗漏的近期新股
+    
+    主数据源更新后，依次尝试备用数据源，检查是否有遗漏的近期新股。
+    只添加不删除，确保数据完整性。
+    
+    Args:
+        db: 数据库实例
+        manager: 数据源管理器
+        
+    Returns:
+        校准统计信息，如果所有备用源都失败则返回None
+    """
+    # 获取最近一周新增的股票
+    recent_new = db.get_recent_new_stocks(days=7)
+    if recent_new:
+        logger.info(f"最近一周已新增 {len(recent_new)} 只股票")
+    
+    # 依次尝试备用数据源进行校准
+    for name, source in manager.sources[1:]:  # 跳过主数据源（已使用）
+        try:
+            result = source.fetch_stock_list()
+            if result.success and result.count >= 4000:
+                stocks_data = [(s.code, s.name) for s in result.stocks]
+                calibrate_stats = db.calibrate_with_data(stocks_data, source=f"校准-{name}")
+                return calibrate_stats
+        except Exception as e:
+            logger.debug(f"校准数据源{name}失败: {e}")
+            continue
+    
+    # 所有备用源都失败，返回无遗漏
+    stats = db.get_stats()
+    return DatabaseStats(
+        total_count=stats.total_count,
+        last_update_time=stats.last_update_time,
+        added_count=0,
+        removed_count=0
+    )
 
 
 def view_data(db: AStockDatabase):

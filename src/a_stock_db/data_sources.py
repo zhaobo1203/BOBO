@@ -1,16 +1,20 @@
 # -*- coding: utf-8 -*-
 """
 A股数据源模块
-支持五个数据源：
-- Baostock（主）
-- 新浪财经（备1）
-- 腾讯财经（备2）
-- AKShare（备3）
-- Efinance（备4）
+支持多个数据源（按优先级排列）：
+- 新浪财经分页（主）- 实时、当天同步新股
+- 东方财富API（备1）- 实时、当天同步新股（可能被封）
+- AKShare聚合（备2）- 轻量级东财列表接口
+- Baostock（备3）- 稳定但新股同步滞后1-2天
+- Efinance（备4）- 东方财富
+- 新浪财经单页（备5）- 可能不完整
+- TuShare（备6）- 需要token
 自动测试速度和稳定性，选择最优数据源
 """
 
 import time
+import os
+import sys
 from typing import Optional
 from dataclasses import dataclass
 import logging
@@ -34,11 +38,15 @@ class DataSourceResult:
     stocks: list[StockInfo]
     count: int
     elapsed_time: float  # 耗时（秒）
+    source_name: str = "unknown"  # 数据源名称
     error_message: Optional[str] = None
 
 
 class DataSourceBase:
     """数据源基类"""
+    
+    # 子类应设置此属性
+    SOURCE_NAME: str = "unknown"
     
     def fetch_stock_list(self) -> DataSourceResult:
         """获取股票列表"""
@@ -63,197 +71,218 @@ class DataSourceBase:
             return True
         
         return False
+    
+    def _clean_stock_name(self, name: str) -> str:
+        """清理股票名称 - 保留新股N/C前缀以利于匹配
+        
+        新股上市初期名称带N/C前缀（如N长鑫），几天后变为正式名（如长鑫科技）。
+        保留前缀的原因：
+        1. 群里讨论新股时常说"N长鑫"，保留前缀有利于匹配
+        2. 去掉前缀后名称不完整（N长鑫→长鑫，但正式名是长鑫科技）
+        3. 几天后API自动返回正式名称，更新时会自动修正
+        4. 代码匹配（如688825）不受名称影响
+        """
+        if not name:
+            return name
+        return name.strip()
+    
+    @staticmethod
+    def _fix_akshare_path():
+        """修复AKShare在PyInstaller打包环境下的路径问题
+        
+        PyInstaller将文件解压到临时目录_MEIxxxxx，但akshare的file_fold可能不存在，
+        导致calendar.json找不到。此方法在导入akshare前创建必要的目录和文件。
+        """
+        if getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS'):
+            base_path = sys._MEIPASS
+            akshare_file_fold = os.path.join(base_path, 'akshare', 'file_fold')
+            if not os.path.exists(akshare_file_fold):
+                os.makedirs(akshare_file_fold, exist_ok=True)
+                calendar_file = os.path.join(akshare_file_fold, 'calendar.json')
+                if not os.path.exists(calendar_file):
+                    with open(calendar_file, 'w', encoding='utf-8') as f:
+                        json.dump({}, f)
+                    logger.info(f"已创建AKShare临时文件: {calendar_file}")
 
 
-class SinaFinanceSource(DataSourceBase):
-    """新浪财经数据源 - 免费、无需注册"""
+class SinaFinancePagedSource(DataSourceBase):
+    """新浪财经分页数据源 - 实时、当天同步新股（主数据源）
+    
+    使用新浪财经API分页获取沪深A股完整列表。
+    优点：免费、无需注册、当天同步新股、数据准确
+    注意：需要分页获取（每页最多80条），完整获取约需30秒
+    """
+    SOURCE_NAME = "新浪财经分页"
     
     def fetch_stock_list(self) -> DataSourceResult:
         start_time = time.time()
         try:
-            stocks = []
-            
+            stocks, seen = [], set()
             headers = {
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
                 "Referer": "http://vip.stock.finance.sina.com.cn/"
             }
-            
-            # 新浪财经A股列表接口 - 沪市和深市分别获取
             base_url = "http://vip.stock.finance.sina.com.cn/quotes_service/api/json_v2.php/Market_Center.getHQNodeData"
             
-            # 获取沪市A股 (node=hs_a)
-            params_sh = {
-                "page": 1,
-                "num": 6000,
-                "sort": "symbol",
-                "asc": 1,
-                "node": "hs_a",
-                "symbol": "",
-                "_s_r_a": "page"
-            }
-            
-            try:
-                resp_sh = requests.get(base_url, params=params_sh, headers=headers, timeout=30)
-                if resp_sh.status_code == 200:
-                    data_sh = resp_sh.json()
-                    if data_sh:
-                        for item in data_sh:
-                            code = item.get('symbol', '')
+            # 分别获取上交所(sh_a)和深交所(sz_a)数据，使用分页
+            for node in ["sh_a", "sz_a"]:
+                page = 1
+                while True:
+                    params = {
+                        "page": page, "num": 80, "sort": "symbol", "asc": 1,
+                        "node": node, "symbol": "", "_s_r_a": "page"
+                    }
+                    try:
+                        resp = requests.get(base_url, params=params, headers=headers, timeout=30)
+                        if resp.status_code != 200:
+                            break
+                        data = resp.json()
+                        if not data:
+                            break
+                        for item in data:
+                            # 注意：使用'code'字段而非'symbol'字段
+                            # symbol带前缀如bj920000/sh600000/sz000001
+                            # code是纯数字如920000/600000/000001
+                            code = item.get('code', '')
                             name = item.get('name', '')
-                            if self._is_valid_stock(code):
-                                stocks.append(StockInfo(code=code, name=name))
-            except Exception as e:
-                logger.warning(f"新浪财经沪市接口失败: {e}")
+                            if self._is_valid_stock(code) and code not in seen:
+                                stocks.append(StockInfo(code=code, name=self._clean_stock_name(name)))
+                                seen.add(code)
+                        if len(data) < 80:
+                            break
+                        page += 1
+                        if page > 100:  # 安全限制
+                            break
+                    except Exception as e:
+                        logger.warning(f"新浪财经{node}第{page}页失败: {e}")
+                        break
             
-            # 获取深市A股 (node=sz_a)
-            params_sz = {
-                "page": 1,
-                "num": 6000,
-                "sort": "symbol",
-                "asc": 1,
-                "node": "sz_a",
-                "symbol": "",
-                "_s_r_a": "page"
-            }
-            
-            try:
-                resp_sz = requests.get(base_url, params=params_sz, headers=headers, timeout=30)
-                if resp_sz.status_code == 200:
-                    data_sz = resp_sz.json()
-                    if data_sz:
-                        for item in data_sz:
-                            code = item.get('symbol', '')
-                            name = item.get('name', '')
-                            if self._is_valid_stock(code):
-                                stocks.append(StockInfo(code=code, name=name))
-            except Exception as e:
-                logger.warning(f"新浪财经深市接口失败: {e}")
-            
-            # 去重
-            seen = set()
-            unique_stocks = []
-            for s in stocks:
-                if s.code not in seen:
-                    seen.add(s.code)
-                    unique_stocks.append(s)
-            
-            # 如果没有获取到数据，抛出异常
-            if not unique_stocks:
-                raise Exception("新浪财经接口未返回有效数据")
-            
+            if not stocks:
+                raise Exception("新浪财经分页接口未返回有效数据")
             elapsed = time.time() - start_time
+            logger.info(f"新浪财经分页获取 {len(stocks)} 只股票, 耗时{elapsed:.1f}秒")
             return DataSourceResult(
-                success=True,
-                stocks=unique_stocks,
-                count=len(unique_stocks),
-                elapsed_time=elapsed
+                success=True, stocks=stocks, count=len(stocks),
+                elapsed_time=elapsed, source_name=self.SOURCE_NAME
             )
-            
         except Exception as e:
             elapsed = time.time() - start_time
-            logger.error(f"新浪财经获取数据失败: {e}")
+            logger.error(f"新浪财经分页获取数据失败: {e}")
             return DataSourceResult(
-                success=False,
-                stocks=[],
-                count=0,
-                elapsed_time=elapsed,
-                error_message=str(e)
+                success=False, stocks=[], count=0,
+                elapsed_time=elapsed, error_message=str(e)
             )
 
 
-class TencentFinanceSource(DataSourceBase):
-    """腾讯财经数据源 - 免费、无需注册"""
+class SinaFinanceSource(DataSourceBase):
+    """新浪财经数据源 - 单页获取（备用，可能不完整）"""
+    SOURCE_NAME = "新浪财经"
     
     def fetch_stock_list(self) -> DataSourceResult:
         start_time = time.time()
         try:
-            stocks = []
-            
+            stocks, seen = [], set()
             headers = {
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
+                "Referer": "http://vip.stock.finance.sina.com.cn/"
             }
+            base_url = "http://vip.stock.finance.sina.com.cn/quotes_service/api/json_v2.php/Market_Center.getHQNodeData"
             
-            # 使用东方财富Web接口 - 这是一个公开的API
-            # 获取沪深A股列表
-            east_url = "http://82.push2.eastmoney.com/api/qt/clist/get"
-            
-            # 沪深A股参数
-            params = {
-                "pn": 1,
-                "pz": 6000,
-                "po": 1,
-                "np": 1,
-                "fltt": 2,
-                "invt": 2,
-                "fid": "f12",
-                "fs": "b:MK0021,b:MK0022,b:MK0023,b:MK0024",  # 沪深A股
-                "fields": "f12,f14"  # f12=代码, f14=名称
-            }
-            
-            try:
-                resp = requests.get(east_url, params=params, headers=headers, timeout=30)
-                if resp.status_code == 200:
-                    data = resp.json()
-                    if data and 'data' in data and 'diff' in data['data']:
-                        for item in data['data']['diff']:
-                            code = item.get('f12', '')
-                            name = item.get('f14', '')
-                            if self._is_valid_stock(code):
-                                stocks.append(StockInfo(code=code, name=name))
-            except Exception as e:
-                logger.warning(f"东方财富接口失败: {e}")
-            
-            # 如果东方财富失败，尝试备用接口
-            if not stocks:
-                # 使用同花顺接口
-                ths_url = "http://q.10jqka.com.cn/index/index/board/all/field/zdf/dir/desc/p/1"
-                headers_ths = {
-                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-                    "Referer": "http://q.10jqka.com.cn/"
+            for node in ["sh_a", "sz_a"]:
+                params = {
+                    "page": 1, "num": 6000, "sort": "symbol", "asc": 1,
+                    "node": node, "symbol": "", "_s_r_a": "page"
                 }
                 try:
-                    resp = requests.get(ths_url, headers=headers_ths, timeout=30)
+                    resp = requests.get(base_url, params=params, headers=headers, timeout=30)
                     if resp.status_code == 200:
-                        # 解析HTML（简单处理）
-                        import re
-                        pattern = r'<td>(\d{6})</td>.*?<td>(.*?)</td>'
-                        matches = re.findall(pattern, resp.text, re.DOTALL)
-                        for code, name in matches[:100]:  # 限制数量避免过多
-                            if self._is_valid_stock(code):
-                                stocks.append(StockInfo(code=code.strip(), name=name.strip()))
+                        data = resp.json()
+                        if data:
+                            for item in data:
+                                code = item.get('code', '')
+                                name = item.get('name', '')
+                                if self._is_valid_stock(code) and code not in seen:
+                                    stocks.append(StockInfo(code=code, name=self._clean_stock_name(name)))
+                                    seen.add(code)
                 except Exception as e:
-                    logger.warning(f"同花顺接口失败: {e}")
+                    logger.warning(f"新浪财经{node}接口失败: {e}")
             
             if not stocks:
-                raise Exception("无法从任何免费接口获取数据")
-            
+                raise Exception("新浪财经接口未返回有效数据")
             elapsed = time.time() - start_time
             return DataSourceResult(
-                success=True,
-                stocks=stocks,
-                count=len(stocks),
-                elapsed_time=elapsed
+                success=True, stocks=stocks, count=len(stocks),
+                elapsed_time=elapsed, source_name=self.SOURCE_NAME
             )
-            
         except Exception as e:
             elapsed = time.time() - start_time
-            logger.error(f"腾讯财经获取数据失败: {e}")
+            logger.error(f"新浪财经获取数据失败: {e}")
             return DataSourceResult(
-                success=False,
-                stocks=[],
-                count=0,
-                elapsed_time=elapsed,
-                error_message=str(e)
+                success=False, stocks=[], count=0,
+                elapsed_time=elapsed, error_message=str(e)
+            )
+
+
+class TencentFinanceSource(DataSourceBase):
+    """东方财富API数据源 - push2可能被封，自动降级"""
+    SOURCE_NAME = "东方财富API"
+    
+    def fetch_stock_list(self) -> DataSourceResult:
+        start_time = time.time()
+        try:
+            stocks, seen = [], set()
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
+                "Referer": "https://quote.eastmoney.com/",
+            }
+            # 沪深A股参数 - 使用市场类型过滤（非板块过滤）
+            params = {
+                "pn": 1, "pz": 6000, "po": 1, "np": 1, "fltt": 2, "invt": 2, "fid": "f12",
+                "fs": "m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23,m:0+t:81+s:2048",
+                "fields": "f12,f14", "ut": "fa5fd1943c7b386f172d6893dbfba10b",
+            }
+            # 尝试多个东方财富URL
+            for url in ["http://82.push2.eastmoney.com/api/qt/clist/get",
+                        "https://push2.eastmoney.com/api/qt/clist/get"]:
+                try:
+                    resp = requests.get(url, params=params, headers=headers, timeout=15)
+                    if resp.status_code == 200:
+                        data = resp.json()
+                        if data and 'data' in data and 'diff' in data['data']:
+                            for item in data['data']['diff']:
+                                code, name = item.get('f12', ''), item.get('f14', '')
+                                if self._is_valid_stock(code) and code not in seen:
+                                    stocks.append(StockInfo(code=code, name=self._clean_stock_name(name)))
+                                    seen.add(code)
+                            if stocks:
+                                break
+                except Exception as e:
+                    logger.debug(f"东方财富接口{url}失败: {e}")
+            if not stocks:
+                raise Exception("无法从任何免费接口获取数据")
+            elapsed = time.time() - start_time
+            return DataSourceResult(
+                success=True, stocks=stocks, count=len(stocks),
+                elapsed_time=elapsed, source_name=self.SOURCE_NAME
+            )
+        except Exception as e:
+            elapsed = time.time() - start_time
+            logger.error(f"东方财富API获取数据失败: {e}")
+            return DataSourceResult(
+                success=False, stocks=[], count=0,
+                elapsed_time=elapsed, error_message=str(e)
             )
 
 
 class BaostockSource(DataSourceBase):
-    """Baostock数据源"""
+    """Baostock数据源 - 稳定但新股同步滞后1-2天，增加新股补充查询"""
+    SOURCE_NAME = "Baostock"
     
     def fetch_stock_list(self) -> DataSourceResult:
         start_time = time.time()
         try:
             import baostock as bs
+            from datetime import datetime, timedelta
             
             # 登录系统
             lg = bs.login()
@@ -262,8 +291,7 @@ class BaostockSource(DataSourceBase):
             
             # 获取所有证券基本信息
             rs = bs.query_stock_basic()
-            
-            stocks = []
+            stocks, seen = [], set()
             while (rs.error_code == '0') & rs.next():
                 row = rs.get_row_data()
                 code = str(row[0]).strip()  # 代码格式: sh.600000 或 sz.000001
@@ -275,39 +303,61 @@ class BaostockSource(DataSourceBase):
                 else:
                     pure_code = code[2:] if len(code) > 6 else code
                 
-                if self._is_valid_stock(pure_code):
+                if self._is_valid_stock(pure_code) and pure_code not in seen:
                     stocks.append(StockInfo(code=pure_code, name=name))
+                    seen.add(pure_code)
+            
+            # 补充查询：获取最近7天上市的新股（Baostock基础数据可能滞后）
+            try:
+                today = datetime.now().strftime('%Y-%m-%d')
+                week_ago = (datetime.now() - timedelta(days=7)).strftime('%Y-%m-%d')
+                rs2 = bs.query_stock_basic(code_name="", start_date=week_ago, end_date=today)
+                supplement_count = 0
+                while (rs2.error_code == '0') & rs2.next():
+                    row = rs2.get_row_data()
+                    code = str(row[0]).strip()
+                    name = str(row[1]).strip() if len(row) > 1 else ""
+                    if '.' in code:
+                        pure_code = code.split('.')[1]
+                    else:
+                        pure_code = code[2:] if len(code) > 6 else code
+                    if self._is_valid_stock(pure_code) and pure_code not in seen:
+                        stocks.append(StockInfo(code=pure_code, name=name))
+                        seen.add(pure_code)
+                        supplement_count += 1
+                        logger.info(f"Baostock补充新股: {pure_code} {name}")
+                if supplement_count > 0:
+                    logger.info(f"Baostock新股补充查询: 新增{supplement_count}只")
+            except Exception as e:
+                logger.debug(f"Baostock新股补充查询失败(非致命): {e}")
             
             bs.logout()
             
             elapsed = time.time() - start_time
             return DataSourceResult(
-                success=True,
-                stocks=stocks,
-                count=len(stocks),
-                elapsed_time=elapsed
+                success=True, stocks=stocks, count=len(stocks),
+                elapsed_time=elapsed, source_name=self.SOURCE_NAME
             )
-            
         except Exception as e:
             elapsed = time.time() - start_time
             logger.error(f"Baostock获取数据失败: {e}")
             return DataSourceResult(
-                success=False,
-                stocks=[],
-                count=0,
-                elapsed_time=elapsed,
-                error_message=str(e)
+                success=False, stocks=[], count=0,
+                elapsed_time=elapsed, error_message=str(e)
             )
 
 
 class AKShareSource(DataSourceBase):
     """AKShare数据源 - 使用官方聚合接口获取完整A股列表"""
+    SOURCE_NAME = "AKShare聚合"
     
     def fetch_stock_list(self) -> DataSourceResult:
         start_time = time.time()
         stocks = []
         
         try:
+            # 修复PyInstaller打包环境下的路径问题
+            self._fix_akshare_path()
             import akshare as ak
             
             # 使用 stock_info_a_code_name 获取沪深京A股完整列表
@@ -485,10 +535,12 @@ class TuShareSource(DataSourceBase):
 
 class SinaSpotSource(DataSourceBase):
     """新浪财经实时行情数据源 - 通过AKShare调用"""
+    SOURCE_NAME = "新浪实时行情"
     
     def fetch_stock_list(self) -> DataSourceResult:
         start_time = time.time()
         try:
+            self._fix_akshare_path()
             import akshare as ak
             
             # 使用 stock_zh_a_spot 获取A股实时行情（包含代码和名称）
@@ -532,17 +584,15 @@ class DataSourceManager:
     """数据源管理器 - 自动测试并选择最优数据源"""
     
     def __init__(self):
-        # 数据源优先级：
-        # 主数据源：Baostock
-        # 备用数据源：AKShare聚合、新浪实时行情、TuShare、Efinance、新浪财经、腾讯财经
+        # 数据源优先级（新浪分页为主；AKShare/Baostock为校准备用；东方财富可能被封）
         self.sources = [
-            ("Baostock", BaostockSource()),                    # 主数据源
-            ("AKShare聚合", AKShareSource()),                   # 备用1 - 官方聚合接口
-            ("新浪实时行情", SinaSpotSource()),                  # 备用2 - 新浪实时行情
-            ("TuShare", TuShareSource()),                      # 备用3 - 需要token
-            ("Efinance", EfinanceSource()),                    # 备用4 - 东方财富
-            ("新浪财经", SinaFinanceSource()),                  # 备用5 - 新浪接口
-            ("腾讯财经", TencentFinanceSource()),               # 备用6 - 腾讯接口
+            ("新浪财经分页", SinaFinancePagedSource()),         # 主数据源 - 实时、当天同步新股
+            ("AKShare聚合", AKShareSource()),                   # 备用1 - 官方聚合接口，可校准新股
+            ("Baostock", BaostockSource()),                     # 备用2 - 稳定，含新股补充查询
+            ("东方财富API", TencentFinanceSource()),            # 备用3 - 可能被封
+            ("Efinance", EfinanceSource()),                     # 备用4 - 东方财富
+            ("新浪财经", SinaFinanceSource()),                  # 备用5 - 单页可能不完整
+            ("TuShare", TuShareSource()),                       # 备用6 - 需要token
         ]
         self.test_results: dict[str, DataSourceResult] = {}
     
@@ -584,8 +634,12 @@ class DataSourceManager:
         
         return None, None
     
-    def fetch_with_fallback(self) -> DataSourceResult:
-        """按优先级依次尝试获取数据"""
+    def fetch_with_fallback(self, current_count: int = 0) -> DataSourceResult:
+        """按优先级依次尝试获取数据
+        
+        Args:
+            current_count: 当前数据库中的股票数量，用于数量验证
+        """
         for name, source in self.sources:
             print(f"尝试从 {name} 获取数据...")
             result = source.fetch_stock_list()

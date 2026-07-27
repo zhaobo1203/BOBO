@@ -858,7 +858,7 @@ class WeChatDatabaseDecryptor:
                 stored_hmac = page[PAGE_SIZE - HMAC_SIZE: PAGE_SIZE]
                 expected_hmac = _compute_page_hmac(mac_key, page, page_num)
                 if not hmac.compare_digest(stored_hmac, expected_hmac):
-                    logger.warning("Page %s HMAC verification failed; decrypting page anyway", page_num)
+                    logger.debug("Page %s HMAC verification failed; decrypting page anyway", page_num)
                     _append_hmac_warning_page(page_num)
                     anomaly_debug = _build_page_anomaly_debug(
                         enc_key,
@@ -871,7 +871,7 @@ class WeChatDatabaseDecryptor:
                     )
                     if len(result["hmac_debug_samples"]) < 8:
                         result["hmac_debug_samples"].append(anomaly_debug)
-                    logger.warning(
+                    logger.debug(
                         "[decrypt.page_anomaly] %s",
                         json.dumps(
                             {
@@ -954,7 +954,7 @@ class WeChatDatabaseDecryptor:
                     json.dumps(result["failed_page_samples"], ensure_ascii=False),
                 )
             if int(result.get("hmac_warning_pages") or 0) > 0:
-                logger.warning(
+                logger.debug(
                     "解密输出包含HMAC告警页但已保留页内容: db=%s total_pages=%s hmac_warning_pages=%s samples=%s",
                     result["db_name"],
                     int(total_pages),

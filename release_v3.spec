@@ -5,7 +5,7 @@
 配置说明:
 - 打包模式: 单文件打包 (onefile)
 - 入口文件: src/main.py（统一入口）
-- 输出名称: 微信群消息监听_v3.0.0.exe
+- 输出名称: 微信群小工具_v3.0.0.exe
 - 包含模块: 模块1(微信监控) + 模块2(A股数据管理) + 模块3(股票分析)
 - 控制台模式: 启用 (console=True)
 - UPX压缩: 禁用 (保证兼容性)
@@ -259,7 +259,7 @@ exe = EXE(
     a.zipfiles,
     a.datas,
     [],
-    name='微信群消息监听_v3.0.0',
+    name='微信群小工具_v3.0.0',
     debug=False,
     bootloader_ignore_signals=False,
     runtime_tmpdir=None,

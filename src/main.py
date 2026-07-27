@@ -84,15 +84,66 @@ def redirect_message_storage_paths():
     message_storage.DEFAULT_DB_PATH = message_storage.DEFAULT_DATA_DIR / "messages.db"
 
 
+def _verify_a_stock_db(db_path: Path) -> bool:
+    """验证A股数据库表结构完整性
+
+    检查数据库是否包含必要的表（stocks, update_log），
+    防止空数据库或损坏的数据库被当作有效数据库使用。
+
+    Args:
+        db_path: 数据库文件路径
+
+    Returns:
+        True 如果数据库表结构完整，False 否则
+    """
+    import sqlite3
+    try:
+        conn = sqlite3.connect(str(db_path))
+        cursor = conn.cursor()
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        tables = {row[0] for row in cursor.fetchall()}
+
+        required_tables = {'stocks', 'update_log'}
+        if not required_tables.issubset(tables):
+            missing = required_tables - tables
+            conn.close()
+            print(f"  [警告] A股数据库缺少表: {missing}")
+            return False
+
+        # 验证stocks表是否有数据
+        cursor.execute("SELECT COUNT(*) FROM stocks")
+        count = cursor.fetchone()[0]
+        conn.close()
+        if count == 0:
+            print(f"  [警告] A股数据库stocks表为空（0条记录）")
+            return False
+
+        return True
+    except Exception as e:
+        print(f"  [警告] A股数据库验证失败: {e}")
+        return False
+
+
 def ensure_a_stock_db():
-    """确保A股数据库存在于EXE同目录
+    """确保A股数据库存在于EXE同目录且表结构完整
 
     onefile模式下，打包在EXE内的文件运行时解压到临时目录（sys._MEIPASS）。
     首次运行时需要将A股数据库复制到EXE同目录。
+    如果已存在的数据库表结构不完整（如空数据库），会重新释放。
     """
     target_path = APP_DIR / "data" / "a_stock_db" / "a_stock.db"
+
+    # 检查目标数据库是否存在且表结构完整
     if target_path.exists():
-        return  # 已存在，无需释放
+        if _verify_a_stock_db(target_path):
+            return  # 数据库完整，无需操作
+        else:
+            # 数据库存在但表结构不完整，需要重新释放
+            print(f"  [修复] A股数据库表结构不完整，尝试重新释放...")
+            try:
+                target_path.unlink()
+            except Exception as e:
+                print(f"  [警告] 无法删除损坏的数据库: {e}")
 
     if getattr(sys, 'frozen', False):
         source_path = Path(sys._MEIPASS) / "data" / "a_stock_db" / "a_stock.db"
@@ -100,14 +151,21 @@ def ensure_a_stock_db():
             target_path.parent.mkdir(parents=True, exist_ok=True)
             import shutil
             shutil.copy2(str(source_path), str(target_path))
-            print(f"  已释放A股数据库到: {target_path}")
+            # 验证释放后的数据库
+            if _verify_a_stock_db(target_path):
+                print(f"  已释放A股数据库到: {target_path}")
+            else:
+                print(f"  [警告] 释放的A股数据库仍不完整，将通过API初始化")
         else:
-            print(f"  [警告] EXE内部未找到A股数据库资源")
+            print(f"  [警告] EXE内部未找到A股数据库资源，将通过API初始化")
     else:
         # 开发模式：检查项目根目录的data
         source_path = APP_DIR / "data" / "a_stock_db" / "a_stock.db"
         if source_path.exists():
-            print(f"  A股数据库已就绪: {source_path}")
+            if _verify_a_stock_db(source_path):
+                print(f"  A股数据库已就绪: {source_path}")
+            else:
+                print(f"  [警告] A股数据库表结构不完整: {source_path}")
         else:
             print(f"  [警告] 未找到A股数据库: {source_path}")
 
@@ -120,11 +178,31 @@ def ensure_directories():
     (APP_DIR / "output").mkdir(parents=True, exist_ok=True)
 
 
+def _is_port_in_use(port: int) -> bool:
+    """检查端口是否被占用"""
+    import socket
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        try:
+            s.bind(("0.0.0.0", port))
+            return False
+        except OSError:
+            return True
+
+
+def _find_available_port(start_port: int = 8000, max_tries: int = 100) -> int:
+    """从start_port开始寻找可用端口"""
+    for port in range(start_port, start_port + max_tries):
+        if not _is_port_in_use(port):
+            return port
+    return start_port  # 找不到则返回原始端口
+
+
 def start_fastapi_server():
     """在后台线程启动FastAPI服务
 
     FastAPI服务在后台线程中启动，不阻塞主线程的微信监控交互。
     uvicorn日志重定向到文件，避免HTTP请求日志干扰控制台显示。
+    支持端口冲突自动切换：当默认端口被占用时，自动寻找可用端口。
     """
     import uvicorn
     import logging
@@ -139,6 +217,18 @@ def start_fastapi_server():
 
     # 释放A股数据库
     ensure_a_stock_db()
+
+    # 检测端口可用性，自动切换
+    default_port = 8000
+    if _is_port_in_use(default_port):
+        actual_port = _find_available_port(default_port + 1)
+        print(f"  [!] 端口 {default_port} 已被占用，自动切换到端口 {actual_port}")
+    else:
+        actual_port = default_port
+
+    # 更新模块3的API端口配置，确保内部调用一致
+    from stock_analysis.config import settings
+    settings.API_PORT = actual_port
 
     # 配置uvicorn日志：access log和error log只写文件，不输出到控制台
     # 这样避免HTTP请求日志干扰看板和微信监控的终端显示
@@ -169,14 +259,14 @@ def start_fastapi_server():
         uvicorn.run(
             "stock_analysis.main:app",
             host="0.0.0.0",
-            port=8000,
+            port=actual_port,
             log_level="info",
             log_config=log_config,
         )
 
     server_thread = threading.Thread(target=run_server, daemon=True)
     server_thread.start()
-    return server_thread
+    return server_thread, actual_port
 
 
 def main():
@@ -193,9 +283,10 @@ def main():
 
     # 1. 启动FastAPI服务（后台线程）
     print("  [..] 启动股票分析服务...")
+    api_port = 8000  # 默认端口
     try:
-        server_thread = start_fastapi_server()
-        print("  [OK] 股票分析服务已启动 (http://localhost:8000)")
+        server_thread, api_port = start_fastapi_server()
+        print(f"  [OK] 股票分析服务已启动 (http://localhost:{api_port})")
     except Exception as e:
         print(f"  [FAIL] 股票分析服务启动失败: {e}")
         print(f"  继续启动微信监控...")
@@ -204,7 +295,9 @@ def main():
     # 2. 启动终端看板（后台线程，追加模式）
     print("  [..] 启动终端看板...")
     try:
-        from stock_analysis.dashboard import start_dashboard_thread
+        from stock_analysis.dashboard import start_dashboard_thread, set_api_base
+        # 动态设置看板API地址，与实际启动端口一致
+        set_api_base(f"http://localhost:{api_port}")
         dashboard_controller = start_dashboard_thread()
         print("  [OK] 终端看板已启动（追加模式，120秒自动刷新）")
     except Exception as e:

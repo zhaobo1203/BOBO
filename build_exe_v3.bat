@@ -105,7 +105,7 @@ echo.
 REM ============== 步骤5: 验证输出 ==============
 echo [5/7] 验证输出文件...
 
-set EXE_FILE=dist\微信群消息监听_v3.0.0.exe
+set EXE_FILE=dist\微信群小工具_v3.0.0.exe
 
 if not exist "%EXE_FILE%" (
     echo [错误] 未生成EXE文件: %EXE_FILE%
@@ -154,7 +154,7 @@ echo. >> release\使用说明.txt
 echo 【使用方法】 >> release\使用说明.txt
 echo 1. 确保已安装微信并登录 >> release\使用说明.txt
 echo 2. 首次运行请先安装 vc_redist.x64.exe >> release\使用说明.txt
-echo 3. 双击运行 微信群消息监听_v3.0.0.exe >> release\使用说明.txt
+echo 3. 双击运行 微信群小工具_v3.0.0.exe >> release\使用说明.txt
 echo 4. 按照提示完成：进程检测→密钥获取→选择群聊 >> release\使用说明.txt
 echo 5. 监控启动后，股票分析服务自动运行 >> release\使用说明.txt
 echo. >> release\使用说明.txt
@@ -198,7 +198,7 @@ echo  文件大小: %EXE_SIZE_MB% MB
 echo  发布目录: release\
 echo.
 echo  发布文件清单:
-echo    - 微信群消息监听_v3.0.0.exe
+echo    - 微信群小工具_v3.0.0.exe
 echo    - vc_redist.x64.exe
 echo    - 使用说明.txt
 echo.

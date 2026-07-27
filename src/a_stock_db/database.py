@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 from typing import Optional
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 import logging
 
 logger = logging.getLogger(__name__)
@@ -222,6 +223,90 @@ class AStockDatabase:
         return DatabaseStats(
             total_count=total_count,
             last_update_time=last_update_time
+        )
+    
+    def get_recent_new_stocks(self, days: int = 7) -> list[tuple[str, str, str]]:
+        """获取最近N天内新增的股票（数据校准用）
+        
+        Args:
+            days: 往前追溯天数，默认7天
+            
+        Returns:
+            新增股票列表，每个元素为 (股票代码, 股票名称, 创建时间)
+        """
+        cutoff = (datetime.now() - timedelta(days=days)).strftime('%Y-%m-%d %H:%M:%S')
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT code, name, created_at FROM stocks WHERE created_at >= ? ORDER BY created_at DESC",
+                (cutoff,)
+            )
+            return cursor.fetchall()
+    
+    def calibrate_with_data(self, stocks: list[tuple[str, str]], source: str = "calibration") -> DatabaseStats:
+        """数据校准：用外部数据源补充遗漏的新股
+        
+        与 update_stocks 不同，此方法只添加不删除，专门用于校准遗漏的新股。
+        适用于：主数据源更新后，用备用数据源补充可能遗漏的近期新股。
+        
+        Args:
+            stocks: 股票列表，每个元素为 (股票代码, 股票名称)
+            source: 数据来源标识
+            
+        Returns:
+            校准统计信息（added_count为校准新增的数量）
+        """
+        # 获取现有股票代码
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT code FROM stocks")
+            existing_codes = {row[0] for row in cursor.fetchall()}
+        
+        # 找出遗漏的股票
+        new_codes = {code for code, _ in stocks}
+        added_codes = new_codes - existing_codes
+        
+        if not added_codes:
+            logger.info("数据校准完成：无遗漏股票")
+            stats = self.get_stats()
+            return DatabaseStats(
+                total_count=stats.total_count,
+                last_update_time=stats.last_update_time,
+                added_count=0,
+                removed_count=0
+            )
+        
+        # 插入遗漏的股票
+        added_stocks = [(code, name) for code, name in stocks if code in added_codes]
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            for code, name in added_stocks:
+                cursor.execute('''
+                    INSERT INTO stocks (code, name, updated_at) 
+                    VALUES (?, ?, CURRENT_TIMESTAMP)
+                    ON CONFLICT(code) DO UPDATE SET 
+                        name = excluded.name,
+                        updated_at = CURRENT_TIMESTAMP
+                ''', (code, name))
+                logger.info(f"校准新增股票: {code} {name}")
+            
+            # 记录校准日志
+            cursor.execute('''
+                INSERT INTO update_log (total_count, added_count, removed_count, source)
+                VALUES (?, ?, 0, ?)
+            ''', (self.get_stock_count() + len(added_codes), len(added_codes), source))
+            
+            conn.commit()
+        
+        total = self.get_stock_count()
+        logger.info(f"数据校准完成：新增 {len(added_codes)} 只遗漏股票，当前总数 {total}")
+        
+        stats = self.get_stats()
+        return DatabaseStats(
+            total_count=total,
+            last_update_time=stats.last_update_time,
+            added_count=len(added_codes),
+            removed_count=0
         )
     
     def clear_all(self):

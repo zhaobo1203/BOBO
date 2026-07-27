@@ -22,6 +22,7 @@ class StorageService:
         self.messages_db_path = messages_db_path or str(MESSAGES_DB_PATH)
         self._last_processed_id: int = 0
         self._init_db()
+        self._ensure_messages_db()
 
     def _init_db(self):
         """初始化数据库，创建表结构"""
@@ -79,6 +80,51 @@ class StorageService:
         conn.commit()
         conn.close()
         logger.info(f"存储数据库初始化完成: {self.db_path}")
+
+    def _ensure_messages_db(self):
+        """确保messages.db中存在group_messages表
+
+        模块3启动时可能早于模块1，导致messages.db中尚未创建group_messages表。
+        此方法主动创建该表（IF NOT EXISTS），避免查询时报 'no such table' 错误。
+        表结构与 wechat_decrypt_tool.message_storage.MessageStorage._ensure_database() 保持一致。
+        """
+        try:
+            conn = sqlite3.connect(self.messages_db_path, timeout=30)
+            cursor = conn.cursor()
+
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS group_messages (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    sender_nickname TEXT NOT NULL,
+                    message_content TEXT NOT NULL,
+                    send_time DATETIME NOT NULL,
+                    group_name TEXT NOT NULL,
+                    group_id TEXT,
+                    sender_id TEXT,
+                    message_type INTEGER DEFAULT 1,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+
+            # 创建索引（与MessageStorage一致）
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_send_time
+                ON group_messages(send_time)
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_group_name
+                ON group_messages(group_name)
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_group_id
+                ON group_messages(group_id)
+            """)
+
+            conn.commit()
+            conn.close()
+            logger.info(f"messages.db group_messages表已确保存在: {self.messages_db_path}")
+        except Exception as e:
+            logger.warning(f"确保messages.db表结构失败: {e}")
 
     def save_mentions(self, mentions: List[MentionRecord], process_type: str = "full") -> int:
         """

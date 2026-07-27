@@ -90,6 +90,11 @@ def update_stock_db_and_reload() -> dict:
     更新A股数据库并重新加载匹配引擎索引
     端到端流程：模块2更新数据 → 模块3重新加载索引
     
+    增强功能：
+    - 传入当前数据库数量给数据源管理器，用于数量验证
+    - 更新后验证新数量 >= 旧数量（新股只增不减）
+    - 使用 source_name 记录正确的数据来源
+    
     Returns:
         更新结果字典
     """
@@ -98,12 +103,17 @@ def update_stock_db_and_reload() -> dict:
     logger.info("开始更新A股数据库...")
     
     try:
-        # 1. 调用模块2的数据源管理器获取最新数据
+        # 1. 获取当前数据库中的股票数量（用于数量验证）
         from a_stock_db.data_sources import DataSourceManager
         from a_stock_db.database import AStockDatabase
         
+        db = AStockDatabase()
+        current_count = db.get_stock_count()
+        logger.info(f"当前数据库股票数量: {current_count}")
+        
+        # 2. 调用模块2的数据源管理器获取最新数据（传入当前数量用于验证）
         manager = DataSourceManager()
-        result = manager.fetch_with_fallback()
+        result = manager.fetch_with_fallback(current_count=current_count)
         
         if not result.success:
             logger.error(f"A股数据获取失败: {result.error_message}")
@@ -112,17 +122,40 @@ def update_stock_db_and_reload() -> dict:
                 "message": f"A股数据获取失败: {result.error_message}",
             }
         
-        # 2. 更新数据库
-        db = AStockDatabase()
+        # 3. 更新数据库（使用 source_name 记录数据来源）
         stocks_data = [(s.code, s.name) for s in result.stocks]
-        db_stats = db.update_stocks(stocks_data, source=result.source if hasattr(result, 'source') else "unknown")
+        db_stats = db.update_stocks(stocks_data, source=result.source_name)
         
-        logger.info(f"A股数据库更新完成: 获取{result.count}只, 耗时{result.elapsed_time:.1f}秒")
+        logger.info(f"A股数据库更新完成: 获取{result.count}只, 数据源={result.source_name}, 耗时{result.elapsed_time:.1f}秒")
         
-        # 3. 重新加载匹配引擎索引
+        # 4. 数据校准：用备用数据源补充可能遗漏的近期新股（追溯一周）
+        calibrate_added = 0
+        for cal_name, cal_source in manager.sources[1:]:  # 跳过主数据源（已使用）
+            try:
+                cal_result = cal_source.fetch_stock_list()
+                if cal_result.success and cal_result.count >= 4000:
+                    cal_stocks = [(s.code, s.name) for s in cal_result.stocks]
+                    cal_stats = db.calibrate_with_data(cal_stocks, source=f"校准-{cal_name}")
+                    calibrate_added = cal_stats.added_count
+                    if calibrate_added > 0:
+                        logger.info(f"数据校准: {cal_name}补充{calibrate_added}只遗漏股票")
+                    break  # 第一个成功的备用源即可
+            except Exception as e:
+                logger.debug(f"校准数据源{cal_name}失败: {e}")
+                continue
+        
+        # 5. 验证更新后数量（新股只增不减，新数量应 >= 旧数量）
+        new_db_count = db.get_stock_count()
+        if current_count > 0 and new_db_count < current_count:
+            logger.warning(
+                f"更新后数量({new_db_count})少于更新前({current_count})，"
+                f"数据可能不完整，但已写入数据库（增量更新不会删除已有股票）"
+            )
+        
+        # 7. 重新加载匹配引擎索引
         old_count, new_count = stock_loader.reload()
         
-        # 4. 重建匹配引擎
+        # 8. 重建匹配引擎
         matcher = Matcher(
             name_index=stock_loader.get_name_index(),
             code_index=stock_loader.get_code_index(),
@@ -135,6 +168,8 @@ def update_stock_db_and_reload() -> dict:
             "old_count": old_count,
             "new_count": new_count,
             "fetched_count": result.count,
+            "source_name": result.source_name,
+            "calibrate_added": calibrate_added,
             "elapsed_time": round(result.elapsed_time, 1),
         }
         
@@ -199,7 +234,10 @@ async def lifespan(app: FastAPI):
     # 启动时尝试全量匹配（可能因模块1尚未准备好而失败，降级处理）
     try:
         result = run_full_match()
-        logger.info(f"启动全量匹配结果: {result}")
+        if result.get("error"):
+            logger.warning(f"启动全量匹配返回错误: {result}")
+        else:
+            logger.info(f"启动全量匹配结果: {result}")
     except Exception as e:
         logger.warning(f"启动全量匹配失败（模块1可能尚未准备好）: {e}")
         logger.warning("将在定时增量更新中自动重试")
@@ -217,7 +255,7 @@ async def lifespan(app: FastAPI):
     logger.info("模块3 数据分析服务已停止")
 
 
-def create_app() -> FastAPI:
+def create_app():
     """创建FastAPI应用"""
     # 初始化日志
     setup_logging()
