@@ -18,6 +18,8 @@ multiprocessing.freeze_support()
 if not getattr(sys, 'frozen', False):
     sys.path.insert(0, str(Path(__file__).parent))
 
+from common_utils import display_error_and_exit
+
 
 # 获取EXE所在目录（运行时数据根目录）
 def get_app_dir() -> Path:
@@ -97,28 +99,34 @@ def _verify_a_stock_db(db_path: Path) -> bool:
         True 如果数据库表结构完整，False 否则
     """
     import sqlite3
+    
+    if not db_path.exists():
+        print(f"  [警告] A股数据库文件不存在: {db_path}")
+        return False
+    
     try:
-        conn = sqlite3.connect(str(db_path))
-        cursor = conn.cursor()
-        cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
-        tables = {row[0] for row in cursor.fetchall()}
+        with sqlite3.connect(str(db_path)) as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
+            tables = {row[0] for row in cursor.fetchall()}
 
-        required_tables = {'stocks', 'update_log'}
-        if not required_tables.issubset(tables):
-            missing = required_tables - tables
-            conn.close()
-            print(f"  [警告] A股数据库缺少表: {missing}")
-            return False
+            required_tables = {'stocks', 'update_log'}
+            if not required_tables.issubset(tables):
+                missing = required_tables - tables
+                print(f"  [警告] A股数据库缺少表: {missing}")
+                return False
 
-        # 验证stocks表是否有数据
-        cursor.execute("SELECT COUNT(*) FROM stocks")
-        count = cursor.fetchone()[0]
-        conn.close()
-        if count == 0:
-            print(f"  [警告] A股数据库stocks表为空（0条记录）")
-            return False
+            # 验证stocks表是否有数据
+            cursor.execute("SELECT COUNT(*) FROM stocks")
+            count = cursor.fetchone()[0]
+            if count == 0:
+                print(f"  [警告] A股数据库stocks表为空（0条记录）")
+                return False
 
-        return True
+            return True
+    except sqlite3.Error as e:
+        print(f"  [警告] A股数据库验证失败（SQLite错误）: {e}")
+        return False
     except Exception as e:
         print(f"  [警告] A股数据库验证失败: {e}")
         return False
@@ -142,20 +150,24 @@ def ensure_a_stock_db():
             print(f"  [修复] A股数据库表结构不完整，尝试重新释放...")
             try:
                 target_path.unlink()
-            except Exception as e:
+            except OSError as e:
                 print(f"  [警告] 无法删除损坏的数据库: {e}")
+                return  # 无法删除，放弃操作
 
     if getattr(sys, 'frozen', False):
         source_path = Path(sys._MEIPASS) / "data" / "a_stock_db" / "a_stock.db"
         if source_path.exists():
             target_path.parent.mkdir(parents=True, exist_ok=True)
             import shutil
-            shutil.copy2(str(source_path), str(target_path))
-            # 验证释放后的数据库
-            if _verify_a_stock_db(target_path):
-                print(f"  已释放A股数据库到: {target_path}")
-            else:
-                print(f"  [警告] 释放的A股数据库仍不完整，将通过API初始化")
+            try:
+                shutil.copy2(str(source_path), str(target_path))
+                # 验证释放后的数据库
+                if _verify_a_stock_db(target_path):
+                    print(f"  已释放A股数据库到: {target_path}")
+                else:
+                    print(f"  [警告] 释放的A股数据库仍不完整，将通过API初始化")
+            except OSError as e:
+                print(f"  [警告] 复制A股数据库失败: {e}")
         else:
             print(f"  [警告] EXE内部未找到A股数据库资源，将通过API初始化")
     else:
@@ -220,11 +232,11 @@ def start_fastapi_server():
 
     # 检测端口可用性，自动切换
     default_port = 8000
+    actual_port = default_port
     if _is_port_in_use(default_port):
         actual_port = _find_available_port(default_port + 1)
-        print(f"  [!] 端口 {default_port} 已被占用，自动切换到端口 {actual_port}")
-    else:
-        actual_port = default_port
+        if actual_port != default_port:
+            print(f"  [!] 端口 {default_port} 已被占用，自动切换到端口 {actual_port}")
 
     # 更新模块3的API端口配置，确保内部调用一致
     from stock_analysis.config import settings
@@ -294,6 +306,7 @@ def main():
 
     # 2. 启动终端看板（后台线程，追加模式）
     print("  [..] 启动终端看板...")
+    dashboard_controller = None
     try:
         from stock_analysis.dashboard import start_dashboard_thread, set_api_base
         # 动态设置看板API地址，与实际启动端口一致
@@ -302,7 +315,6 @@ def main():
         print("  [OK] 终端看板已启动（追加模式，120秒自动刷新）")
     except Exception as e:
         print(f"  [FAIL] 终端看板启动失败: {e}")
-        dashboard_controller = None
     print()
 
     # 3. 运行微信监控（主线程）
@@ -321,23 +333,9 @@ def main():
         import logging
         logger = logging.getLogger(__name__)
         logger.exception(f"程序发生未捕获异常: {e}")
-
-        # 显示友好的错误信息
-        print()
-        print("=" * 60)
-        print("  程序遇到错误，抱歉!")
-        print("=" * 60)
-        print()
-        print(f"  错误类型: {type(e).__name__}")
-        print(f"  错误信息: {str(e)[:100]}")
-        print()
-        print("  可能的解决方案:")
-        print("  1. 确保微信已登录")
-        print("  2. 以管理员权限运行程序")
-        print("  3. 检查杀毒软件是否拦截")
-        print()
-        input("  按 Enter 键退出...")
-        sys.exit(1)
+        
+        # 使用公共模块显示错误
+        display_error_and_exit(e)
 
 
 if __name__ == '__main__':

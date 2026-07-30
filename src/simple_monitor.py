@@ -10,8 +10,15 @@ import os
 import time
 import logging
 import multiprocessing
+import sqlite3
+import tempfile
+import hashlib
+import json
+import re
+import traceback
 from pathlib import Path
 from datetime import datetime
+from typing import Optional, Any, List, Dict
 
 # Windows PyInstaller 打包必须：防止 multiprocessing 子进程重新执行主程序
 # 必须在程序最开始时调用，否则会导致程序卡死
@@ -23,23 +30,99 @@ if not getattr(sys, 'frozen', False):
 
 from wechat_decrypt_tool.exe_logging import setup_exe_logging, get_exe_logger, get_exe_dir
 from wechat_decrypt_tool.constants import POLL_INTERVAL_DEFAULT, POLL_INTERVAL_MIN, POLL_INTERVAL_MAX, ZSTD_MAGIC
+from common_utils import display_error_and_exit, parse_timestamp, format_timestamp, truncate_text
 
 # 初始化日志
 setup_exe_logging()
 logger = get_exe_logger(__name__)
 
 
+# ==================== 目录查找辅助函数 ====================
+
+SKIP_DIRS = {'all users', 'applet', 'wmpf', 'backup', 'config', 'cache'}
+
+
+def _find_session_db_in_account_dir(base_path: Path) -> Optional[Path]:
+    """在账号目录下查找 session.db
+    
+    Args:
+        base_path: 账号目录路径
+        
+    Returns:
+        session.db 路径，未找到返回 None
+    """
+    if not base_path.exists() or not base_path.is_dir():
+        return None
+    
+    direct_paths = [
+        base_path / 'db_storage' / 'session' / 'session.db',
+        base_path / 'db_storage' / 'session.db',
+    ]
+    
+    for path in direct_paths:
+        if path.exists():
+            return path
+    return None
+
+
+def _find_account_dir(base_path: Path, account_id: Optional[str] = None) -> Optional[Path]:
+    """查找包含有效 session.db 的账号目录
+    
+    统一的账号目录查找逻辑，合并了原有的多个查找方法
+    
+    Args:
+        base_path: 基础目录路径
+        account_id: 可选的账号ID，用于匹配目录名
+        
+    Returns:
+        找到的账号目录路径，未找到返回 None
+    """
+    if not base_path.exists() or not base_path.is_dir():
+        return None
+    
+    try:
+        for sub_dir in base_path.iterdir():
+            if not sub_dir.is_dir():
+                continue
+            
+            dir_name_lower = sub_dir.name.lower()
+            if dir_name_lower in SKIP_DIRS:
+                continue
+            
+            # 如果指定了账号ID，检查目录名是否匹配
+            if account_id and account_id.lower() not in dir_name_lower:
+                continue
+            
+            # 检查是否包含有效的 session.db
+            if _find_session_db_in_account_dir(sub_dir):
+                return sub_dir
+                
+    except (PermissionError, OSError) as e:
+        logger.debug(f"[账号查找] 遍历目录失败: {base_path}, 错误: {e}")
+    
+    return None
+
+
+# ==================== SimpleMonitor 类 ====================
+
 class SimpleMonitor:
     """简化版监控器 - 一键启动"""
 
     def __init__(self):
-        self.pid = None
-        self.account_id = None
-        self.data_path = None
-        self.db_key = None
-        self.handle = None
-        self.groups = []
+        self.pid: Optional[int] = None
+        self.account_id: Optional[str] = None
+        self.data_path: Optional[str] = None
+        self.db_key: Optional[str] = None
+        self.handle: Optional[int] = None
+        self.groups: List[Dict] = []
+        self.temp_dir: Optional[str] = None
+        self.decrypted_session_db: Optional[str] = None
+        self.decrypted_contact_db: Optional[str] = None
+        self.use_static_mode: bool = False
+        self.nickname_cache: Dict[str, str] = {}
 
+    # ==================== 显示辅助方法 ====================
+    
     def print_header(self):
         """显示头部"""
         print()
@@ -48,21 +131,28 @@ class SimpleMonitor:
         print("=" * 60)
         print()
 
-    def print_step(self, step_name, status, detail=""):
+    def print_step(self, step_name: str, status: str, detail: str = ""):
         """显示步骤状态"""
-        if status == 'done':
-            symbol = "[OK]"
-        elif status == 'doing':
-            symbol = "[..]"
-        else:
-            symbol = "[FAIL]"
-
+        status_symbols = {
+            'done': '[OK]',
+            'doing': '[..]',
+            'fail': '[FAIL]'
+        }
+        symbol = status_symbols.get(status, '[??]')
+        
         line = f"  {symbol} {step_name}"
         if detail:
             line += f": {detail}"
         print(line)
 
-    def step1_detect_process(self):
+    def _wait_exit(self):
+        """等待退出"""
+        print()
+        input("  按 Enter 键退出...")
+
+    # ==================== 步骤1: 进程检测 ====================
+    
+    def step1_detect_process(self) -> bool:
         """步骤1: 进程检测"""
         print()
         self.print_step("进程检测", "doing")
@@ -92,7 +182,9 @@ class SimpleMonitor:
             print("  请先启动微信并登录账号!")
             return False
 
-    def step2_detect_account(self):
+    # ==================== 步骤2: 账号识别 ====================
+    
+    def step2_detect_account(self) -> bool:
         """步骤2: 账号识别"""
         self.print_step("账号识别", "doing")
 
@@ -111,84 +203,46 @@ class SimpleMonitor:
         if result.get('current_account'):
             self.account_id = result['current_account']
 
-            # 使用参考项目的方法查找正确的账号目录
-            self.data_path = self._find_account_dir_with_db_storage(detected_dirs, self.account_id)
+            # 查找包含有效 db_storage 的账号目录
+            for base_dir in detected_dirs:
+                account_dir = _find_account_dir(Path(base_dir), self.account_id)
+                if account_dir:
+                    self.data_path = str(account_dir)
+                    break
 
             if not self.data_path:
-                # 如果找不到有效的db_storage，使用原始逻辑
+                # 如果找不到有效的 db_storage，使用原始逻辑
                 if result.get('data_path'):
                     self.data_path = result['data_path']
                 else:
-                    self.data_path = self._find_account_dir(detected_dirs, self.account_id)
+                    self.data_path = self._find_legacy_account_dir(detected_dirs, self.account_id)
 
-            account_display = self.account_id[:20] + "..." if len(self.account_id) > 20 else self.account_id
+            account_display = truncate_text(self.account_id, 20)
             self.print_step("账号识别", "done", account_display)
             logger.info(f"[步骤2] 检测到账号: {self.account_id}, 数据路径: {self.data_path}")
             return True
         else:
             # 账号检测失败时，尝试在检测到的目录中查找包含有效数据库的账号目录
-            self.data_path = self._find_any_valid_account_dir(detected_dirs)
-            if self.data_path:
-                # 从路径中提取账号ID
-                dir_name = Path(self.data_path).name
-                if dir_name.startswith('wxid_') or dir_name.startswith('wl_'):
-                    self.account_id = dir_name
-                self.print_step("账号识别", "done", f"自动发现: {self.account_id or '未知账号'}")
-                logger.info(f"[步骤2] 自动发现账号目录: {self.data_path}")
-                return True
-            else:
-                # 最后降级：使用第一个检测到的目录
-                self.data_path = detected_dirs[0]
-                self.print_step("账号识别", "done", "使用默认目录")
-                logger.warning(f"[步骤2] 未能找到有效账号目录，使用默认: {self.data_path}")
-                return True
+            for base_dir in detected_dirs:
+                account_dir = _find_account_dir(Path(base_dir))
+                if account_dir:
+                    self.data_path = str(account_dir)
+                    # 从路径中提取账号ID
+                    dir_name = account_dir.name
+                    if dir_name.startswith('wxid_') or dir_name.startswith('wl_'):
+                        self.account_id = dir_name
+                    self.print_step("账号识别", "done", f"自动发现: {self.account_id or '未知账号'}")
+                    logger.info(f"[步骤2] 自动发现账号目录: {self.data_path}")
+                    return True
+            
+            # 最后降级：使用第一个检测到的目录
+            self.data_path = detected_dirs[0]
+            self.print_step("账号识别", "done", "使用默认目录")
+            logger.warning(f"[步骤2] 未能找到有效账号目录，使用默认: {self.data_path}")
+            return True
 
-    def _find_account_dir_with_db_storage(self, base_dirs: list, account_id: str):
-        """查找包含有效 db_storage 的账号目录（参考项目的方法）"""
-        for base_dir in base_dirs:
-            base_path = Path(base_dir)
-            if not base_path.exists() or not base_path.is_dir():
-                continue
-
-            try:
-                for sub_dir in base_path.iterdir():
-                    if not sub_dir.is_dir():
-                        continue
-
-                    # 检查目录名是否包含账号ID
-                    if account_id.lower() in sub_dir.name.lower():
-                        # 验证 session.db 是否存在
-                        test_path = sub_dir / 'db_storage' / 'session' / 'session.db'
-                        logger.debug(f"[步骤2] 检查路径: {test_path}, 存在: {test_path.exists()}")
-                        if test_path.exists():
-                            logger.info(f"[步骤2] 找到有效账号目录: {sub_dir}")
-                            return str(sub_dir)
-            except (PermissionError, OSError) as e:
-                logger.debug(f"[步骤2] 遍历目录失败: {base_dir}, 错误: {e}")
-                continue
-
-            # 参考项目: 检查 "WeChat Files" 子目录
-            wechat_files_path = base_path / 'WeChat Files'
-            if wechat_files_path.exists() and wechat_files_path.is_dir():
-                try:
-                    for sub_dir in wechat_files_path.iterdir():
-                        if not sub_dir.is_dir():
-                            continue
-
-                        if account_id.lower() in sub_dir.name.lower():
-                            test_path = sub_dir / 'db_storage' / 'session' / 'session.db'
-                            logger.debug(f"[步骤2] 检查路径: {test_path}, 存在: {test_path.exists()}")
-                            if test_path.exists():
-                                logger.info(f"[步骤2] 找到有效账号目录: {sub_dir}")
-                                return str(sub_dir)
-                except (PermissionError, OSError) as e:
-                    logger.debug(f"[步骤2] 遍历WeChat Files目录失败: {e}")
-                    continue
-
-        return None
-
-    def _find_account_dir(self, base_dirs: list, account_id: str):
-        """查找账号对应的数据目录"""
+    def _find_legacy_account_dir(self, base_dirs: List[str], account_id: str) -> Optional[str]:
+        """查找账号对应的数据目录（旧版兼容）"""
         for base_dir in base_dirs:
             try:
                 for item in os.listdir(base_dir):
@@ -199,87 +253,22 @@ class SimpleMonitor:
                 continue
         return base_dirs[0] if base_dirs else None
 
-    def _find_any_valid_account_dir(self, base_dirs: list) -> str | None:
-        """在检测到的目录中查找包含有效数据库的账号目录
-        
-        当账号检测失败时，遍历检测到的目录，找到包含有效 db_storage 的账号子目录。
-        """
-        for base_dir in base_dirs:
-            base_path = Path(base_dir)
-            if not base_path.exists() or not base_path.is_dir():
-                continue
-            
-            logger.debug(f"[账号查找] 遍历目录: {base_dir}")
-            
-            try:
-                # 遍历子目录，查找 wxid_* 或 wl_* 开头的账号目录
-                for sub_dir in base_path.iterdir():
-                    if not sub_dir.is_dir():
-                        continue
-                    
-                    # 跳过非账号目录
-                    dir_name = sub_dir.name.lower()
-                    if dir_name in ['all users', 'applet', 'wmpf', 'backup', 'config']:
-                        continue
-                    
-                    # 检查是否包含有效的 session.db
-                    session_db = sub_dir / 'db_storage' / 'session' / 'session.db'
-                    if session_db.exists():
-                        logger.info(f"[账号查找] 找到有效账号目录: {sub_dir}")
-                        return str(sub_dir)
-                    
-                    # 也检查旧版路径
-                    session_db_alt = sub_dir / 'db_storage' / 'session.db'
-                    if session_db_alt.exists():
-                        logger.info(f"[账号查找] 找到有效账号目录(旧版路径): {sub_dir}")
-                        return str(sub_dir)
-                        
-            except (PermissionError, OSError) as e:
-                logger.debug(f"[账号查找] 遍历目录失败: {base_dir}, 错误: {e}")
-                continue
-            
-            # 检查 "WeChat Files" 子目录结构
-            wechat_files_path = base_path / 'WeChat Files'
-            if wechat_files_path.exists() and wechat_files_path.is_dir():
-                try:
-                    for sub_dir in wechat_files_path.iterdir():
-                        if not sub_dir.is_dir():
-                            continue
-                        
-                        dir_name = sub_dir.name.lower()
-                        if dir_name in ['all users', 'applet', 'wmpf', 'backup']:
-                            continue
-                        
-                        session_db = sub_dir / 'db_storage' / 'session' / 'session.db'
-                        if session_db.exists():
-                            logger.info(f"[账号查找] 找到有效账号目录(WeChat Files): {sub_dir}")
-                            return str(sub_dir)
-                            
-                except (PermissionError, OSError) as e:
-                    logger.debug(f"[账号查找] 遍历WeChat Files目录失败: {e}")
-                    continue
-        
-        logger.warning("[账号查找] 未找到任何有效的账号目录")
-        return None
-
-    def step3_get_key(self):
+    # ==================== 步骤3: 密钥获取 ====================
+    
+    def step3_get_key(self) -> bool:
         """步骤3: 密钥获取 - 每次启动重新获取，不使用旧密钥"""
         self.print_step("密钥获取", "doing")
 
-        import json
-        import traceback
-
         exe_dir = get_exe_dir()
-        cwd = Path.cwd()
+        key_store_path = exe_dir / 'output' / 'account_keys.json'
 
         # 清除旧的密钥文件，确保每次启动都重新获取
-        key_store_path = exe_dir / 'output' / 'account_keys.json'
         if key_store_path.exists():
             try:
                 key_store_path.unlink()
                 logger.info("[步骤3] 已清除旧密钥文件，将重新获取")
                 print("    检查旧密钥文件: 已清除，将重新获取")
-            except Exception as e:
+            except OSError as e:
                 logger.warning(f"[步骤3] 清除旧密钥文件失败: {e}")
         else:
             logger.info("[步骤3] 无旧密钥文件，将重新获取")
@@ -293,6 +282,42 @@ class SimpleMonitor:
         print("  [!] 整体超时保护: 120秒，超时后将提供手动输入选项")
         print()
 
+        # 尝试 Hook 注入获取密钥
+        if self._try_fetch_key_via_hook():
+            return True
+
+        # 所有方式都失败，提供手动输入降级
+        self.print_step("密钥获取", "fail", "自动获取未成功")
+        print()
+        print("  自动获取密钥失败，您可以：")
+        print("  1. 手动输入64位十六进制密钥")
+        print("  2. 确保 output/account_keys.json 文件存在且包含当前账号密钥")
+        print("  3. 重新运行程序并确保微信已正常登录")
+        print()
+        print("  常见原因：")
+        print("  - 微信未正确安装或安装路径异常")
+        print("  - 微信版本过新，Hook暂不支持")
+        print("  - 需要管理员权限运行")
+        print()
+
+        manual_key = self._prompt_manual_key()
+        if manual_key:
+            self.db_key = manual_key
+            self.print_step("密钥获取", "done", "手动输入")
+            logger.info("[步骤3] 使用手动输入密钥（降级）")
+            self._save_key()
+            return True
+
+        print()
+        print("  未提供密钥，程序将退出。")
+        print("  请通过以下方式获取密钥后重试：")
+        print("  - 使用其他工具导出密钥")
+        print("  - 检查 output/account_keys.json 是否存在")
+        print()
+        return False
+
+    def _try_fetch_key_via_hook(self) -> bool:
+        """尝试通过 Hook 注入获取密钥"""
         try:
             from wechat_decrypt_tool.key_service import WeChatKeyFetcher
 
@@ -300,7 +325,7 @@ class SimpleMonitor:
             logger.info("[步骤3] WeChatKeyFetcher 实例化成功，开始调用 fetch_db_key()...")
 
             result = fetcher.fetch_db_key()
-            logger.info(f"[步骤3] fetch_db_key() 返回结果: {type(result).__name__}, keys={list(result.keys()) if result else 'None'}")
+            logger.info(f"[步骤3] fetch_db_key() 返回结果: {type(result).__name__}")
 
             if result:
                 db_key = result.get('key') or result.get('db_key')
@@ -308,7 +333,7 @@ class SimpleMonitor:
                 if db_key and len(str(db_key)) == 64:
                     self.db_key = str(db_key).lower()
 
-                    # 验证密钥是否匹配session.db
+                    # 验证密钥是否匹配 session.db
                     print(f"  验证密钥与数据库匹配性...", flush=True)
                     logger.info("[步骤3] 开始验证密钥与数据库匹配性")
 
@@ -318,7 +343,7 @@ class SimpleMonitor:
                         self._save_key()
                         return True
                     else:
-                        # 密钥不匹配任何session.db，但仍保存密钥，让步骤4尝试
+                        # 密钥不匹配任何 session.db，但仍保存密钥，让步骤4尝试
                         logger.warning("[步骤3] 密钥与所有session.db不匹配，将继续尝试")
                         print(f"  [!] 密钥与当前数据库不匹配，将在步骤4中重试")
                         self.print_step("密钥获取", "done", "Hook注入成功（未验证）")
@@ -354,39 +379,10 @@ class SimpleMonitor:
             print(f"  [!] Hook注入失败: {e}")
             print(f"  [!] 详细信息请查看日志文件")
 
-        # 方法3: 所有方式都失败，提供手动输入降级
-        self.print_step("密钥获取", "fail", "自动获取未成功")
-        print()
-        print("  自动获取密钥失败，您可以：")
-        print("  1. 手动输入64位十六进制密钥")
-        print("  2. 确保 output/account_keys.json 文件存在且包含当前账号密钥")
-        print("  3. 重新运行程序并确保微信已正常登录")
-        print()
-        print("  常见原因：")
-        print("  - 微信未正确安装或安装路径异常")
-        print("  - 微信版本过新，Hook暂不支持")
-        print("  - 需要管理员权限运行")
-        print()
-
-        manual_key = self._prompt_manual_key()
-        if manual_key:
-            self.db_key = manual_key
-            self.print_step("密钥获取", "done", "手动输入")
-            logger.info("[步骤3] 使用手动输入密钥（降级）")
-            self._save_key()
-            return True
-
-        print()
-        print("  未提供密钥，程序将退出。")
-        print("  请通过以下方式获取密钥后重试：")
-        print("  - 使用其他工具导出密钥")
-        print("  - 检查 output/account_keys.json 是否存在")
-        print()
         return False
 
-    def _prompt_manual_key(self) -> str | None:
-        """提示用户手动输入64位十六进制密钥（超时降级）"""
-        import re
+    def _prompt_manual_key(self) -> Optional[str]:
+        """提示用户手动输入64位十六进制密钥"""
         try:
             print("  请输入64位十六进制密钥（按 Enter 跳过）: ", end="", flush=True)
             raw = input().strip()
@@ -426,14 +422,14 @@ class SimpleMonitor:
         import hmac as hmac_mod
         import struct
 
-        try:
-            PAGE_SIZE = 4096
-            SALT_SIZE = 16
-            IV_SIZE = 16
-            HMAC_SIZE = 64
-            RESERVE_SIZE = IV_SIZE + HMAC_SIZE
-            KEY_SIZE = 32
+        PAGE_SIZE = 4096
+        SALT_SIZE = 16
+        IV_SIZE = 16
+        HMAC_SIZE = 64
+        RESERVE_SIZE = IV_SIZE + HMAC_SIZE
+        KEY_SIZE = 32
 
+        try:
             # 读取第1页
             with open(db_path, 'rb') as f:
                 page1 = f.read(PAGE_SIZE)
@@ -485,17 +481,11 @@ class SimpleMonitor:
             logger.warning(f"[密钥验证] 验证异常: {e}")
             return False
 
-    def _find_all_session_dbs(self) -> list[str]:
-        """查找所有可能的session.db路径
-
-        使用 rglob 递归搜索所有微信数据目录，覆盖各种目录结构：
-        - xwechat_files/<account>_<suffix>/db_storage/session/session.db
-        - xwechat_files/all_users/login/<account>/...
-        - Weixin/xwechat_files/...
-        - 任意嵌套结构
+    def _find_all_session_dbs(self) -> List[str]:
+        """查找所有可能的 session.db 路径
 
         Returns:
-            session.db路径列表
+            session.db 路径列表
         """
         from wechat_decrypt_tool.wechat_detection import detect_wechat_installation
 
@@ -513,18 +503,18 @@ class SimpleMonitor:
                 return
             try:
                 for item in base_dir.rglob('session.db'):
-                    # 只保留在 db_storage 或 session 目录下的 session.db
                     path_str = str(item).lower()
                     if 'db_storage' in path_str or 'session' in str(item.parent).lower():
                         _add_if_new(item)
             except (PermissionError, OSError) as e:
                 logger.debug(f"[session.db搜索] rglob搜索失败: {base_dir}, 错误: {e}")
 
-        # 1. 当前data_path下的session.db（直接路径，优先）
+        # 1. 当前 data_path 下的 session.db（直接路径，优先）
         if self.data_path:
             data_path_obj = Path(self.data_path)
-            _add_if_new(data_path_obj / 'db_storage' / 'session' / 'session.db')
-            _add_if_new(data_path_obj / 'db_storage' / 'session.db')
+            session_db = _find_session_db_in_account_dir(data_path_obj)
+            if session_db:
+                _add_if_new(session_db)
 
         # 2. 搜索所有微信数据目录（递归）
         try:
@@ -533,24 +523,17 @@ class SimpleMonitor:
 
             for data_dir in wechat_data_dirs:
                 data_dir_obj = Path(data_dir)
-                if not data_dir_obj.exists():
-                    continue
-
-                # 递归搜索整个数据目录下的 session.db
-                _rglob_session_dbs(data_dir_obj)
+                if data_dir_obj.exists():
+                    _rglob_session_dbs(data_dir_obj)
 
         except Exception as e:
             logger.warning(f"[session.db搜索] 搜索微信数据目录失败: {e}")
 
         logger.info(f"[session.db搜索] 找到 {len(all_paths)} 个session.db路径")
-        for p in all_paths:
-            logger.debug(f"[session.db搜索]   - {p}")
         return all_paths
 
     def _verify_key_and_find_matching_db(self) -> bool:
-        """验证密钥是否匹配当前session.db，不匹配则搜索其他路径
-
-        包含等待重试机制：Hook获取密钥后，微信可能需要几秒才能用新密钥更新session.db
+        """验证密钥是否匹配当前 session.db，不匹配则搜索其他路径
 
         Returns:
             True=找到匹配的数据库, False=未找到
@@ -563,7 +546,7 @@ class SimpleMonitor:
             logger.warning("[密钥验证] 未找到session.db")
             return False
 
-        # 验证当前session.db
+        # 验证当前 session.db
         if self._verify_key_matches_db(session_db_path, self.db_key):
             logger.info("[密钥验证] 密钥匹配当前session.db")
             return True
@@ -571,38 +554,35 @@ class SimpleMonitor:
         logger.warning(f"[密钥验证] 密钥不匹配当前session.db: {session_db_path}")
         print(f"  [!] 密钥与当前session.db不匹配，搜索其他数据目录...")
 
-        # 搜索所有session.db，找到密钥匹配的
+        # 搜索所有 session.db，找到密钥匹配的
         all_session_dbs = self._find_all_session_dbs()
         for db_path in all_session_dbs:
             if db_path == session_db_path:
-                continue  # 已经验证过
+                continue  # 已验证过
             logger.info(f"[密钥验证] 尝试: {db_path}")
             if self._verify_key_matches_db(db_path, self.db_key):
                 logger.info(f"[密钥验证] 找到匹配的session.db: {db_path}")
                 print(f"  [OK] 找到密钥匹配的数据库: {db_path}")
 
-                # 更新data_path为匹配的数据库所在目录
-                # db_path: .../ToweR1989_b2c9/db_storage/session/session.db
-                # data_path应为: .../ToweR1989_b2c9
+                # 更新 data_path 为匹配的数据库所在目录
                 new_data_path = str(Path(db_path).parent.parent.parent)
                 if Path(new_data_path).exists():
                     logger.info(f"[密钥验证] 更新data_path: {self.data_path} -> {new_data_path}")
                     self.data_path = new_data_path
                     return True
 
-        # 所有session.db都不匹配，尝试等待重试
-        # Hook获取密钥后，微信可能需要几秒才能用新密钥更新session.db
+        # 所有 session.db 都不匹配，尝试等待重试
         logger.info("[密钥验证] 首次验证失败，等待5秒后重试...")
         print(f"  等待微信更新数据库（5秒）...", flush=True)
         time.sleep(5)
 
-        # 重新验证当前session.db
+        # 重新验证当前 session.db
         session_db_path = self._find_session_db()
         if session_db_path and self._verify_key_matches_db(session_db_path, self.db_key):
             logger.info("[密钥验证] 重试验证成功")
             return True
 
-        # 重新搜索所有session.db
+        # 重新搜索所有 session.db
         all_session_dbs = self._find_all_session_dbs()
         for db_path in all_session_dbs:
             if self._verify_key_matches_db(db_path, self.db_key):
@@ -620,8 +600,6 @@ class SimpleMonitor:
 
     def _save_key(self):
         """保存密钥到存储"""
-        import json
-
         exe_dir = get_exe_dir()
         key_store_path = exe_dir / 'output' / 'account_keys.json'
 
@@ -633,7 +611,7 @@ class SimpleMonitor:
                 store = json.loads(key_store_path.read_text(encoding='utf-8'))
                 if 'accounts' not in store:
                     store['accounts'] = {}
-            except Exception:
+            except (json.JSONDecodeError, OSError):
                 store = {'accounts': {}}
 
         if self.account_id:
@@ -646,10 +624,12 @@ class SimpleMonitor:
         try:
             key_store_path.write_text(json.dumps(store, indent=2, ensure_ascii=False), encoding='utf-8')
             logger.info(f"[步骤3] 密钥已保存")
-        except Exception as e:
+        except OSError as e:
             logger.warning(f"[步骤3] 保存密钥失败: {e}")
 
-    def step4_connect_db(self):
+    # ==================== 步骤4: 数据库连接 ====================
+    
+    def step4_connect_db(self) -> bool:
         """步骤4: 数据库连接"""
         self.print_step("数据库连接", "doing")
 
@@ -660,31 +640,30 @@ class SimpleMonitor:
         print(f"  等待微信初始化完成...")
         time.sleep(3)
 
-        # 在解密前再次验证密钥与数据库匹配性
-        # （步骤3可能验证未通过，此时微信已完全初始化，数据库可能已更新）
+        # 查找 session.db
         session_db_path = self._find_session_db()
         if not session_db_path:
             self.print_step("数据库连接", "fail", "session.db不存在")
             return False
 
-        # 验证密钥是否匹配当前session.db
+        # 验证密钥是否匹配当前 session.db
         if not self._verify_key_matches_db(session_db_path, self.db_key):
             logger.warning("[步骤4] 密钥与当前session.db不匹配，重新搜索匹配的数据库...")
             print(f"  [!] 密钥与session.db不匹配，重新搜索...")
 
             if self._verify_key_and_find_matching_db():
-                # 找到了匹配的数据库，重新获取session.db路径
+                # 找到了匹配的数据库，重新获取 session.db 路径
                 session_db_path = self._find_session_db()
                 if not session_db_path:
                     self.print_step("数据库连接", "fail", "session.db不存在")
                     return False
                 logger.info(f"[步骤4] 密钥验证通过，使用匹配的数据库: {session_db_path}")
             else:
-                # 所有session.db都不匹配，仍然尝试解密（可能数据库刚被微信更新）
+                # 所有 session.db 都不匹配，仍然尝试解密
                 logger.warning("[步骤4] 所有session.db均不匹配密钥，仍将尝试解密")
                 print(f"  [!] 未找到密钥匹配的数据库，仍将尝试解密...")
 
-        # 首先尝试静态解密（用于获取群聊列表）
+        # 首先尝试静态解密
         print(f"  使用静态解密方式...")
         logger.info(f"[步骤4] 尝试静态解密方式连接数据库")
 
@@ -697,18 +676,22 @@ class SimpleMonitor:
         except Exception as e:
             logger.warning(f"[步骤4] 静态解密失败: {e}")
 
-        # 尝试 WCDB 连接（用于消息获取）
+        # 尝试 WCDB 连接
         print(f"  尝试 WCDB 连接...", flush=True)
         logger.info(f"[步骤4] 尝试WCDB实时连接")
 
+        self._try_wcdb_connection(session_db_path)
+
+        # 只要静态解密成功，就返回 True
+        return static_success
+
+    def _try_wcdb_connection(self, session_db_path: str):
+        """尝试 WCDB 连接"""
+        import threading
+        
         try:
-            from wechat_decrypt_tool.wcdb_realtime import open_account, WCDBRealtimeError
+            from wechat_decrypt_tool.wcdb_realtime import open_account
 
-            def _connect_wcdb():
-                return open_account(session_db_path, self.db_key, timeout=8.0)
-
-            # 使用较短的超时时间，避免长时间等待
-            import threading
             result = [None]
             exception = [None]
 
@@ -723,12 +706,10 @@ class SimpleMonitor:
             thread.join(timeout=10.0)  # 最多等待10秒
 
             if thread.is_alive():
-                # 超时，WCDB 连接未完成
                 logger.warning(f"[步骤4] WCDB连接超时(10秒)，使用静态模式")
                 self.handle = None
                 print(f"  WCDB 连接超时，将使用静态模式", flush=True)
             elif exception[0]:
-                # 连接出错
                 logger.warning(f"[步骤4] WCDB连接失败: {exception[0]}")
                 self.handle = None
                 print(f"  WCDB 连接失败: {exception[0]}", flush=True)
@@ -746,13 +727,8 @@ class SimpleMonitor:
             self.handle = None
             print(f"  WCDB 连接异常: {e}", flush=True)
 
-        # 只要静态解密成功，就返回 True
-        return static_success
-
     def _connect_via_static_decrypt(self, session_db_path: str) -> bool:
         """通过静态解密方式连接数据库"""
-        import tempfile
-        import sqlite3
         from wechat_decrypt_tool.wechat_decrypt import WeChatDatabaseDecryptor
 
         self.temp_dir = tempfile.mkdtemp(prefix="wechat_monitor_")
@@ -765,39 +741,32 @@ class SimpleMonitor:
 
         print(f"  session.db 解密成功")
 
+        # 解密 contact.db
         contact_db_path = self._find_contact_db()
         if contact_db_path:
             self.decrypted_contact_db = os.path.join(self.temp_dir, "contact.db")
-            if decryptor.decrypt_database(contact_db_path, self.decrypted_contact_db):
-                print(f"  contact.db 解密成功")
-            else:
+            if not decryptor.decrypt_database(contact_db_path, self.decrypted_contact_db):
                 self.decrypted_contact_db = None
         else:
             self.decrypted_contact_db = None
 
         self.use_static_mode = True
-        self.static_mode_for_groups_only = True  # 静态解密仅用于获取群聊列表
 
-        # 加载昵称缓存（从 contact.db）
+        # 加载昵称缓存
         self._load_nickname_cache()
 
+        # 验证解密后的数据库
         try:
-            conn = sqlite3.connect(self.decrypted_session_db)
-            cursor = conn.cursor()
-            cursor.execute("SELECT name FROM sqlite_master WHERE type='table' LIMIT 1")
-            cursor.fetchone()
-            conn.close()
-            return True
-        except Exception:
+            with sqlite3.connect(self.decrypted_session_db) as conn:
+                cursor = conn.cursor()
+                cursor.execute("SELECT name FROM sqlite_master WHERE type='table' LIMIT 1")
+                cursor.fetchone()
+                return True
+        except sqlite3.Error:
             return False
 
     def _load_nickname_cache(self):
-        """从 contact.db 加载昵称缓存
-
-        建立 wxid -> 昵称 的映射字典
-        """
-        import sqlite3
-
+        """从 contact.db 加载昵称缓存"""
         self.nickname_cache = {}
 
         if not self.decrypted_contact_db or not os.path.exists(self.decrypted_contact_db):
@@ -805,93 +774,30 @@ class SimpleMonitor:
             return
 
         try:
-            conn = sqlite3.connect(self.decrypted_contact_db)
-            cursor = conn.cursor()
+            with sqlite3.connect(self.decrypted_contact_db) as conn:
+                cursor = conn.cursor()
+                cursor.execute("SELECT username, nick_name, remark FROM contact")
 
-            # 查询所有联系人
-            cursor.execute("""
-                SELECT username, nick_name, remark
-                FROM contact
-            """)
+                count = 0
+                for row in cursor.fetchall():
+                    username, nick_name, remark = row
+                    display_name = remark or nick_name or ''
+                    if display_name and username:
+                        self.nickname_cache[username] = display_name
+                        count += 1
 
-            count = 0
-            for row in cursor.fetchall():
-                username, nick_name, remark = row
-                # 优先使用备注名，其次昵称
-                display_name = remark or nick_name or ''
-                if display_name and username:
-                    self.nickname_cache[username] = display_name
-                    count += 1
+                logger.info(f"[昵称缓存] 已加载 {count} 个昵称映射")
+                print(f"  已加载 {count} 个联系人昵称")
 
-            conn.close()
-            logger.info(f"[昵称缓存] 已加载 {count} 个昵称映射")
-            print(f"  已加载 {count} 个联系人昵称")
-
-        except Exception as e:
+        except sqlite3.Error as e:
             logger.warning(f"[昵称缓存] 加载失败: {e}")
 
     def _get_display_name(self, wxid: str) -> str:
-        """获取 wxid 对应的显示名称
+        """获取 wxid 对应的显示名称"""
+        return self.nickname_cache.get(wxid, wxid)
 
-        优先从缓存获取，找不到则返回原 wxid
-        """
-        if hasattr(self, 'nickname_cache') and self.nickname_cache:
-            return self.nickname_cache.get(wxid, wxid)
-        return wxid
-
-    def _is_non_text_message(self, content: str) -> bool:
-        """判断是否为非纯文字消息（需要完全过滤的）
-
-        过滤: 图片、网页链接、ZIP打包文件、视频、语音等
-        注意: 表情包标记会被清理，不会被过滤
-        """
-        if not content or not content.strip():
-            return True
-
-        content_stripped = content.strip()
-
-        # XML 格式消息（图片、链接、文件等）- 完全过滤
-        if content_stripped.startswith('<?xml') or content_stripped.startswith('<msg'):
-            return True
-
-        # 检查是否包含图片标签（即使不是 XML 开头）
-        if '<img' in content_stripped.lower():
-            return True
-
-        # 检查是否包含其他非文字标签
-        non_text_tags = ['<videomsg', '<voicemsg', '<appmsg', '<emoji', '<location']
-        for tag in non_text_tags:
-            if tag in content_stripped.lower():
-                return True
-
-        return False
-
-    def _clean_message_content(self, content: str) -> str:
-        """清理消息内容，去除表情包标记，保留文字
-
-        例如: "[太阳]【国金计算机】..." -> "【国金计算机】..."
-        例如: "1 半导体...[太阳]晶圆厂..." -> "1 半导体...晶圆厂..."
-        """
-        if not content:
-            return ""
-
-        import re
-
-        # 去除所有位置的表情包标记（如 [太阳]、[红包] 等）
-        # 匹配 [...] 格式的表情包，包括前后有空格的情况
-        cleaned = re.sub(r'\s*\[[^\]]+\]\s*', ' ', content)
-
-        # 清理多余的空格
-        cleaned = re.sub(r'\s+', ' ', cleaned).strip()
-
-        # 如果清理后为空，返回原始内容
-        if not cleaned.strip():
-            return content.strip()
-
-        return cleaned.strip()
-
-    def _find_contact_db(self) -> str | None:
-        """查找contact.db路径"""
+    def _find_contact_db(self) -> Optional[str]:
+        """查找 contact.db 路径"""
         if not self.data_path:
             return None
 
@@ -906,13 +812,8 @@ class SimpleMonitor:
 
         return None
 
-    def _find_session_db(self):
-        """查找session.db路径
-        
-        支持两种情况：
-        1. data_path 已经是账号目录（包含 db_storage）
-        2. data_path 是微信数据根目录（包含 wxid_* 子目录）
-        """
+    def _find_session_db(self) -> Optional[str]:
+        """查找 session.db 路径"""
         if not self.data_path:
             logger.warning("[session.db查找] data_path 未设置")
             return None
@@ -923,82 +824,47 @@ class SimpleMonitor:
             return None
 
         # 优先检查：data_path 已经是账号目录
-        direct_paths = [
-            data_path_obj / 'db_storage' / 'session' / 'session.db',
-            data_path_obj / 'db_storage' / 'session.db',
-            data_path_obj / 'session.db',
-        ]
-        
-        for path in direct_paths:
-            logger.debug(f"[session.db查找] 检查直接路径: {path}")
-            if path.exists():
-                logger.info(f"[session.db查找] 找到: {path}")
-                return str(path)
+        session_db = _find_session_db_in_account_dir(data_path_obj)
+        if session_db:
+            logger.info(f"[session.db查找] 找到: {session_db}")
+            return str(session_db)
 
         # 如果直接路径不存在，检查是否是根目录（包含账号子目录）
         logger.debug(f"[session.db查找] 直接路径不存在，检查子目录...")
-        
-        try:
-            for item in data_path_obj.iterdir():
-                if not item.is_dir():
-                    continue
-                
-                # 跳过非账号目录
-                dir_name = item.name.lower()
-                if dir_name in ['all users', 'applet', 'wmpf', 'backup', 'config', 'cache']:
-                    continue
-                
-                # 检查账号子目录中的 session.db
-                session_db = item / 'db_storage' / 'session' / 'session.db'
-                logger.debug(f"[session.db查找] 检查子目录: {session_db}")
-                if session_db.exists():
-                    logger.info(f"[session.db查找] 在子目录找到: {session_db}")
-                    return str(session_db)
-                
-                # 也检查旧版路径
-                session_db_alt = item / 'db_storage' / 'session.db'
-                if session_db_alt.exists():
-                    logger.info(f"[session.db查找] 在子目录找到(旧版): {session_db_alt}")
-                    return str(session_db_alt)
-                    
-        except (PermissionError, OSError) as e:
-            logger.warning(f"[session.db查找] 遍历目录失败: {e}")
+
+        account_dir = _find_account_dir(data_path_obj)
+        if account_dir:
+            session_db = _find_session_db_in_account_dir(account_dir)
+            if session_db:
+                logger.info(f"[session.db查找] 在子目录找到: {session_db}")
+                return str(session_db)
 
         # 检查 "WeChat Files" 子目录结构
         wechat_files_path = data_path_obj / 'WeChat Files'
         if wechat_files_path.exists() and wechat_files_path.is_dir():
-            logger.debug(f"[session.db查找] 检查 WeChat Files 子目录...")
-            try:
-                for item in wechat_files_path.iterdir():
-                    if not item.is_dir():
-                        continue
-                    
-                    dir_name = item.name.lower()
-                    if dir_name in ['all users', 'applet', 'wmpf', 'backup']:
-                        continue
-                    
-                    session_db = item / 'db_storage' / 'session' / 'session.db'
-                    if session_db.exists():
-                        logger.info(f"[session.db查找] 在 WeChat Files 找到: {session_db}")
-                        return str(session_db)
-                        
-            except (PermissionError, OSError) as e:
-                logger.warning(f"[session.db查找] 遍历 WeChat Files 失败: {e}")
+            account_dir = _find_account_dir(wechat_files_path)
+            if account_dir:
+                session_db = _find_session_db_in_account_dir(account_dir)
+                if session_db:
+                    logger.info(f"[session.db查找] 在 WeChat Files 找到: {session_db}")
+                    return str(session_db)
 
         logger.warning(f"[session.db查找] 未找到 session.db，搜索路径: {self.data_path}")
         return None
 
+    # ==================== 步骤5: 选择群聊 ====================
+    
     def step5_select_group(self):
         """步骤5: 选择群聊"""
         print()
 
-        if getattr(self, 'use_static_mode', False):
+        if self.use_static_mode:
             return self._select_group_static()
         else:
             return self._select_group_wcdb()
 
     def _select_group_wcdb(self):
-        """使用WCDB方式获取群聊列表"""
+        """使用 WCDB 方式获取群聊列表"""
         from wechat_decrypt_tool.wcdb_realtime import get_sessions, WCDBRealtimeError
 
         try:
@@ -1014,7 +880,7 @@ class SimpleMonitor:
 
             for i, group in enumerate(self.groups[:30], 1):
                 name = group.get('displayName', '') or group.get('username', '')
-                name = name[:30] + '...' if len(name) > 30 else name
+                name = truncate_text(name, 30)
                 print(f"    {i:2d}. {name}")
 
             if len(self.groups) > 30:
@@ -1029,11 +895,7 @@ class SimpleMonitor:
         return self._get_user_choice()
 
     def _select_group_static(self):
-        """使用静态解密方式选择群聊
-
-        优化流程：后台获取群聊列表 → 用户输入关键词搜索 → 选择群聊
-        """
-        # 后台获取所有群聊（不显示）
+        """使用静态解密方式选择群聊"""
         self.groups = self._get_groups_from_session()
 
         print("  =========== 选择群聊 ===========")
@@ -1047,14 +909,10 @@ class SimpleMonitor:
         print("  请输入群名称关键词进行搜索")
         print()
 
-        # 直接进入搜索流程
         return self._search_group_interactive()
 
     def _search_group_interactive(self):
-        """交互式群聊搜索
-
-        用户输入关键词 → 显示匹配结果 → 选择编号
-        """
+        """交互式群聊搜索"""
         while True:
             try:
                 keyword = input("  请输入群名称关键词: ").strip()
@@ -1063,7 +921,6 @@ class SimpleMonitor:
                     print("  已取消选择")
                     return None
 
-                # 模糊搜索
                 matched_groups = self._search_groups_in_contact(keyword)
 
                 if not matched_groups:
@@ -1071,16 +928,13 @@ class SimpleMonitor:
                     print()
                     continue
 
-                # 显示搜索结果
                 print()
                 print(f"  找到 {len(matched_groups)} 个匹配的群聊:")
                 print()
 
                 for i, group in enumerate(matched_groups[:20], 1):
                     name = group.get('displayName', '') or group.get('username', '')
-                    # 截断过长的名称
-                    if len(name) > 45:
-                        name = name[:42] + '...'
+                    name = truncate_text(name, 45)
                     print(f"    {i:2d}. {name}")
 
                 if len(matched_groups) > 20:
@@ -1097,7 +951,6 @@ class SimpleMonitor:
                             print("  已取消选择")
                             return None
 
-                        # 尝试解析为数字
                         try:
                             idx = int(choice) - 1
                             if 0 <= idx < len(matched_groups):
@@ -1120,171 +973,84 @@ class SimpleMonitor:
                 print()
                 return None
 
-    def _get_groups_from_session(self) -> list:
+    def _get_groups_from_session(self) -> List[Dict]:
         """从 SessionTable 和 contact 表获取群聊列表"""
-        import sqlite3
-
         try:
             # 1. 从 contact 表获取群昵称
             group_names = {}
             if self.decrypted_contact_db and os.path.exists(self.decrypted_contact_db):
                 try:
-                    conn_contact = sqlite3.connect(self.decrypted_contact_db)
-                    cursor_contact = conn_contact.cursor()
-                    cursor_contact.execute("""
-                        SELECT username, nick_name, remark
-                        FROM contact
-                        WHERE username LIKE '%@chatroom'
-                    """)
-                    for row in cursor_contact.fetchall():
-                        username, nick_name, remark = row
-                        display_name = remark or nick_name or ''
-                        if display_name:
-                            group_names[username] = display_name
-                    conn_contact.close()
-                except Exception:
+                    with sqlite3.connect(self.decrypted_contact_db) as conn:
+                        cursor = conn.cursor()
+                        cursor.execute("""
+                            SELECT username, nick_name, remark
+                            FROM contact
+                            WHERE username LIKE '%@chatroom'
+                        """)
+                        for row in cursor.fetchall():
+                            username, nick_name, remark = row
+                            display_name = remark or nick_name or ''
+                            if display_name:
+                                group_names[username] = display_name
+                except sqlite3.Error:
                     pass
 
             # 2. 从 SessionTable 获取群列表
-            conn = sqlite3.connect(self.decrypted_session_db)
-            cursor = conn.cursor()
+            with sqlite3.connect(self.decrypted_session_db) as conn:
+                cursor = conn.cursor()
+                cursor.execute("""
+                    SELECT username, last_sender_display_name
+                    FROM SessionTable
+                    WHERE username LIKE '%@chatroom'
+                    ORDER BY sort_timestamp DESC
+                    LIMIT 200
+                """)
 
-            cursor.execute("""
-                SELECT username, last_sender_display_name
-                FROM SessionTable
-                WHERE username LIKE '%@chatroom'
-                ORDER BY sort_timestamp DESC
-                LIMIT 200
-            """)
+                groups = []
+                for row in cursor.fetchall():
+                    username, last_sender_display_name = row
+                    display_name = group_names.get(username) or last_sender_display_name or username
+                    groups.append({
+                        'username': username,
+                        'displayName': display_name
+                    })
 
-            groups = []
-            for row in cursor.fetchall():
-                username, last_sender_display_name = row
-                display_name = group_names.get(username) or last_sender_display_name or username
-                groups.append({
-                    'username': username,
-                    'displayName': display_name
-                })
-
-            conn.close()
-            return groups
+                return groups
 
         except Exception as e:
             logger.warning(f"[步骤5] SessionTable查询失败: {e}")
             return []
 
-    def _get_user_choice_with_search(self):
-        """获取用户选择，支持搜索功能"""
-        while True:
-            try:
-                choice = input("  请输入编号或's'搜索: ").strip()
-                if not choice:
-                    return None
-
-                if choice.lower() == 's':
-                    return self._search_group_by_name()
-
-                idx = int(choice) - 1
-                if 0 <= idx < len(self.groups):
-                    return self.groups[idx]
-                print("  无效的编号，请重新输入")
-            except ValueError:
-                print("  请输入数字或's'")
-            except (EOFError, KeyboardInterrupt):
-                return None
-
-    def _search_group_by_name(self):
-        """通过群名称或ID搜索群聊"""
-        print("  =========== 群聊搜索 ===========")
-        print()
-        print("  提示: 输入群名称关键词或群ID")
-        print()
-
-        while True:
-            try:
-                keyword = input("  请输入关键词: ").strip()
-                if not keyword:
-                    print("  已取消搜索")
-                    return None
-
-                matched_groups = self._search_groups_in_contact(keyword)
-
-                if not matched_groups:
-                    print(f"  未找到匹配的群聊")
-                    print("  请尝试其他关键词，或按 Enter 退出")
-                    print()
-                    continue
-
-                print()
-                print(f"  找到 {len(matched_groups)} 个匹配的群聊:")
-                print()
-
-                for i, group in enumerate(matched_groups[:20], 1):
-                    name = group.get('displayName', '') or group.get('username', '')
-                    name = name[:40] + '...' if len(name) > 40 else name
-                    print(f"    {i:2d}. {name}")
-
-                if len(matched_groups) > 20:
-                    print(f"\n  ... 还有 {len(matched_groups) - 20} 个结果")
-
-                print()
-
-                while True:
-                    try:
-                        choice = input("  请输入编号或新关键词: ").strip()
-                        if not choice:
-                            return None
-
-                        try:
-                            idx = int(choice) - 1
-                            if 0 <= idx < len(matched_groups):
-                                return matched_groups[idx]
-                            print("  无效的编号，请重新输入")
-                        except ValueError:
-                            keyword = choice
-                            break
-                    except (EOFError, KeyboardInterrupt):
-                        return None
-
-            except (EOFError, KeyboardInterrupt):
-                return None
-
-    def _search_groups_in_contact(self, keyword: str) -> list:
+    def _search_groups_in_contact(self, keyword: str) -> List[Dict]:
         """从 contact.db 搜索群聊"""
-        import sqlite3
-
         matched_groups = []
 
         if self.decrypted_contact_db and os.path.exists(self.decrypted_contact_db):
             try:
-                conn = sqlite3.connect(self.decrypted_contact_db)
-                cursor = conn.cursor()
+                with sqlite3.connect(self.decrypted_contact_db) as conn:
+                    cursor = conn.cursor()
+                    cursor.execute("""
+                        SELECT username, nick_name, remark
+                        FROM contact
+                        WHERE username LIKE '%@chatroom'
+                        AND (
+                            username LIKE ?
+                            OR nick_name LIKE ?
+                            OR remark LIKE ?
+                        )
+                        ORDER BY nick_name
+                        LIMIT 100
+                    """, (f'%{keyword}%', f'%{keyword}%', f'%{keyword}%'))
 
-                cursor.execute("""
-                    SELECT username, nick_name, remark
-                    FROM contact
-                    WHERE username LIKE '%@chatroom'
-                    AND (
-                        username LIKE ?
-                        OR nick_name LIKE ?
-                        OR remark LIKE ?
-                    )
-                    ORDER BY nick_name
-                    LIMIT 100
-                """, (f'%{keyword}%', f'%{keyword}%', f'%{keyword}%'))
+                    for row in cursor.fetchall():
+                        username, nick_name, remark = row
+                        display_name = remark or nick_name or username
+                        matched_groups.append({
+                            'username': username,
+                            'displayName': f"{display_name} ({username})" if display_name != username else username
+                        })
 
-                rows = cursor.fetchall()
-                for row in rows:
-                    username, nick_name, remark = row
-                    display_name = remark or nick_name or username
-                    matched_groups.append({
-                        'username': username,
-                        'displayName': f"{display_name} ({username})" if display_name != username else username
-                    })
-
-                conn.close()
-
-            except Exception as e:
+            except sqlite3.Error as e:
                 logger.warning(f"[步骤5] contact.db搜索失败: {e}")
 
         return matched_groups
@@ -1305,7 +1071,43 @@ class SimpleMonitor:
             except (EOFError, KeyboardInterrupt):
                 return None
 
-    def decode_message(self, raw_content):
+    # ==================== 消息处理 ====================
+    
+    def _is_non_text_message(self, content: str) -> bool:
+        """判断是否为非纯文字消息（需要完全过滤的）"""
+        if not content or not content.strip():
+            return True
+
+        content_stripped = content.strip()
+
+        # XML 格式消息（图片、链接、文件等）
+        if content_stripped.startswith('<?xml') or content_stripped.startswith('<msg'):
+            return True
+
+        # 检查是否包含图片标签或其他非文字标签
+        non_text_indicators = ['<img', '<videomsg', '<voicemsg', '<appmsg', '<emoji', '<location']
+        content_lower = content_stripped.lower()
+        for indicator in non_text_indicators:
+            if indicator in content_lower:
+                return True
+
+        return False
+
+    def _clean_message_content(self, content: str) -> str:
+        """清理消息内容，去除表情包标记，保留文字"""
+        if not content:
+            return ""
+
+        # 去除所有位置的表情包标记（如 [太阳]、[红包] 等）
+        cleaned = re.sub(r'\s*\[[^\]]+\]\s*', ' ', content)
+
+        # 清理多余的空格
+        cleaned = re.sub(r'\s+', ' ', cleaned).strip()
+
+        # 如果清理后为空，返回原始内容
+        return cleaned if cleaned.strip() else content.strip()
+
+    def decode_message(self, raw_content: Any) -> str:
         """解码消息内容（处理 zstd 压缩和 hex 字符串）"""
         if raw_content is None:
             return ""
@@ -1324,7 +1126,7 @@ class SimpleMonitor:
         # 处理字符串类型
         text = str(raw_content).strip()
 
-        # 检查是否为 hex 字符串（以 "28b52ffd" 开头的 zstd 压缩数据）
+        # 检查是否为 hex 字符串（zstd 压缩数据）
         if len(text) >= 16 and len(text) % 2 == 0:
             try:
                 raw = bytes.fromhex(text)
@@ -1338,13 +1140,53 @@ class SimpleMonitor:
 
         return text
 
-    def start_monitoring(self, target_group):
-        """开始监控（参考 monitor_group.py 优化版）"""
+    def _process_single_message(self, msg: Dict, group_name: str, group_id: str) -> Optional[Dict]:
+        """处理单条消息，返回处理后的消息信息
+        
+        Args:
+            msg: 原始消息字典
+            group_name: 群名称
+            group_id: 群ID
+            
+        Returns:
+            处理后的消息信息字典，如果消息被过滤则返回 None
+        """
+        msg_time = msg.get('create_time') or msg.get('createTime') or 0
+        msg_time_int = parse_timestamp(msg_time)
+
+        sender_wxid = msg.get('sender_username') or msg.get('sender') or '未知'
+        sender = self._get_display_name(sender_wxid)
+
+        raw_content = msg.get('message_content') or msg.get('content') or ''
+        content = self.decode_message(raw_content)
+
+        # 过滤非纯文字消息
+        if self._is_non_text_message(content):
+            return None
+
+        # 清理表情包标记
+        content = self._clean_message_content(content)
+
+        if len(content.strip()) < 1:
+            return None
+
+        return {
+            'time_int': msg_time_int,
+            'time_str': format_timestamp(msg_time_int),
+            'sender': sender,
+            'content': content,
+            'sender_wxid': sender_wxid,
+            'group_name': group_name,
+            'group_id': group_id
+        }
+
+    # ==================== 监控 ====================
+    
+    def start_monitoring(self, target_group: Dict):
+        """开始监控"""
         group_id = target_group.get('username', '')
         group_name = target_group.get('displayName', '') or group_id
-
-        if len(group_name) > 25:
-            group_name = group_name[:25] + '...'
+        group_name = truncate_text(group_name, 25)
 
         print()
         print("=" * 60)
@@ -1357,11 +1199,10 @@ class SimpleMonitor:
 
         storage = get_message_storage()
 
-        # 轮询配置（参考 monitor_group.py）
+        # 轮询配置
         current_interval = POLL_INTERVAL_DEFAULT
         poll_count = 0
         saved_count = 0
-        consecutive_no_new = 0
 
         # 记录已存在的消息时间戳
         last_create_time = 0
@@ -1369,8 +1210,38 @@ class SimpleMonitor:
         # 获取历史消息
         print("  正在获取历史消息...", flush=True)
 
-        # 优先尝试 WCDB 实时方式获取消息
+        messages = self._fetch_history_messages(group_id)
+
+        if messages:
+            self._display_and_save_history(messages, group_name, group_id, storage)
+            # 更新最新消息时间戳
+            for msg in messages:
+                msg_time_int = parse_timestamp(msg.get('create_time') or msg.get('createTime') or 0)
+                if msg_time_int > last_create_time:
+                    last_create_time = msg_time_int
+
+            time_str = format_timestamp(last_create_time, '%Y-%m-%d %H:%M:%S') if last_create_time else "无"
+            print(f"  当前最新消息时间: {time_str}")
+
+        print(f"  自适应轮询: 最小 {POLL_INTERVAL_MIN} 秒, 最大 {POLL_INTERVAL_MAX} 秒")
+        print()
+
+        # 开始监控循环
+        try:
+            last_create_time = self._monitoring_loop(
+                group_id, group_name, storage, last_create_time
+            )
+        except KeyboardInterrupt:
+            print('\n\n[监听已停止]')
+            print(f'[统计] 轮询次数: {poll_count}, 最终间隔: {current_interval:.1f}秒')
+            if saved_count > 0:
+                print(f'[已保存 {saved_count} 条消息到数据库]')
+
+    def _fetch_history_messages(self, group_id: str) -> List[Dict]:
+        """获取历史消息"""
         messages = []
+        
+        # 优先尝试 WCDB 实时方式
         if self.handle and self.handle > 0:
             try:
                 from wechat_decrypt_tool.wcdb_realtime import get_messages
@@ -1381,251 +1252,175 @@ class SimpleMonitor:
                 logger.warning(f"[监控] WCDB 获取消息失败: {e}")
 
         # 如果 WCDB 失败，尝试静态解密
-        if not messages and getattr(self, 'use_static_mode', False):
+        if not messages and self.use_static_mode:
             print("  [..] WCDB 方式失败，尝试静态解密...")
             messages = self._get_messages_static(group_id, limit=100)
 
-        if messages:
-            # 显示历史消息（最新的5条）
-            print(f"  最近 {min(5, len(messages))} 条历史消息:")
-            print()
+        return messages
 
-            # 按时间降序显示（最新消息在上）
-            display_msgs = messages[:5]
-            for msg in display_msgs:
-                msg_time = msg.get('create_time') or msg.get('createTime') or 0
-                try:
-                    msg_time_int = int(msg_time) if msg_time else 0
-                except:
-                    msg_time_int = 0
-
-                # 获取发送者（使用昵称缓存）
-                sender_wxid = msg.get('sender_username') or msg.get('sender') or '未知'
-                sender = self._get_display_name(sender_wxid)
-
-                # 解码消息内容
-                raw_content = msg.get('message_content') or msg.get('content') or ''
-                content = self.decode_message(raw_content)
-
-                # 过滤非纯文字消息（图片、链接等）
-                if self._is_non_text_message(content):
-                    continue  # 跳过非纯文字消息
-
-                # 清理表情包标记，保留文字
-                content = self._clean_message_content(content)
-
-                if len(content.strip()) < 1:
-                    continue  # 跳过空消息
-
-                time_str = datetime.fromtimestamp(msg_time_int).strftime('%H:%M:%S') if msg_time_int else "--:--:--"
-                print(f"    [{time_str}] {sender}: {content}")
-                print()  # 消息之间空一行
-
-            print()
-
-            # 保存历史消息到数据库
-            history_saved = 0
-            for msg in messages:
-                msg_time = msg.get('create_time') or msg.get('createTime') or 0
-                try:
-                    msg_time_int = int(msg_time) if msg_time else 0
-                except:
-                    msg_time_int = 0
-
-                sender_wxid = msg.get('sender_username') or msg.get('sender') or '未知'
-                sender = self._get_display_name(sender_wxid)
-                raw_content = msg.get('message_content') or msg.get('content') or ''
-                content = self.decode_message(raw_content)
-
-                if self._is_non_text_message(content):
-                    continue
-                content = self._clean_message_content(content)
-                if len(content.strip()) < 1:
-                    continue
-
-                try:
-                    storage.save_message(
-                        sender_nickname=sender,
-                        message_content=content,
-                        send_time=datetime.fromtimestamp(msg_time_int),
-                        group_name=group_name,
-                        group_id=group_id,
-                        sender_id=sender_wxid
-                    )
-                    history_saved += 1
-                except Exception as e:
-                    logger.warning(f"[监控] 保存历史消息失败: {e}")
-
-            if history_saved > 0:
-                print(f"  [OK] 已保存 {history_saved} 条历史消息到数据库")
-                # 触发看板刷新，让股票分析尽快处理历史消息
-                try:
-                    from stock_analysis.dashboard import get_dashboard
-                    dashboard = get_dashboard()
-                    if dashboard:
-                        dashboard.trigger_refresh()
-                except Exception:
-                    pass
-                print()
-
-            # 更新最新消息时间戳
-            for msg in messages:
-                msg_time = msg.get('create_time') or msg.get('createTime') or 0
-                try:
-                    msg_time_int = int(msg_time) if msg_time else 0
-                except:
-                    msg_time_int = 0
-                if msg_time_int > last_create_time:
-                    last_create_time = msg_time_int
-
-            time_str = datetime.fromtimestamp(last_create_time).strftime('%Y-%m-%d %H:%M:%S') if last_create_time else "无"
-            print(f"  当前最新消息时间: {time_str}")
-
-        print(f"  自适应轮询: 最小 {POLL_INTERVAL_MIN} 秒, 最大 {POLL_INTERVAL_MAX} 秒")
+    def _display_and_save_history(self, messages: List[Dict], group_name: str, 
+                                    group_id: str, storage) -> int:
+        """显示并保存历史消息"""
+        # 显示历史消息（最新的5条）
+        print(f"  最近 {min(5, len(messages))} 条历史消息:")
         print()
 
-        # 开始监控循环
-        try:
-            while True:
-                # 等待
-                time.sleep(current_interval)
-                poll_count += 1
+        display_msgs = messages[:5]
+        for msg in display_msgs:
+            processed = self._process_single_message(msg, group_name, group_id)
+            if processed:
+                print(f"    [{processed['time_str']}] {processed['sender']}: {processed['content']}")
+                print()
 
-                # 获取最新消息
-                try:
-                    # 优先使用 WCDB 实时方式
-                    if self.handle and self.handle > 0:
-                        from wechat_decrypt_tool.wcdb_realtime import get_messages
-                        new_messages = get_messages(self.handle, group_id, limit=10)
-                    elif getattr(self, 'use_static_mode', False):
-                        new_messages = self._get_messages_static(group_id, limit=10)
-                    else:
-                        new_messages = []
-                except Exception as e:
-                    logger.warning(f"[监控] 获取消息失败: {e}")
+        print()
+
+        # 保存历史消息到数据库
+        history_saved = 0
+        for msg in messages:
+            processed = self._process_single_message(msg, group_name, group_id)
+            if not processed:
+                continue
+
+            try:
+                storage.save_message(
+                    sender_nickname=processed['sender'],
+                    message_content=processed['content'],
+                    send_time=datetime.fromtimestamp(processed['time_int']),
+                    group_name=group_name,
+                    group_id=group_id,
+                    sender_id=processed['sender_wxid']
+                )
+                history_saved += 1
+            except Exception as e:
+                logger.warning(f"[监控] 保存历史消息失败: {e}")
+
+        if history_saved > 0:
+            print(f"  [OK] 已保存 {history_saved} 条历史消息到数据库")
+            # 触发看板刷新
+            self._trigger_dashboard_refresh()
+            print()
+
+        return history_saved
+
+    def _monitoring_loop(self, group_id: str, group_name: str, storage, 
+                          last_create_time: int) -> int:
+        """监控循环"""
+        current_interval = POLL_INTERVAL_DEFAULT
+        poll_count = 0
+        saved_count = 0
+        consecutive_no_new = 0
+
+        while True:
+            # 等待
+            time.sleep(current_interval)
+            poll_count += 1
+
+            # 获取最新消息
+            try:
+                new_messages = self._fetch_new_messages(group_id)
+            except Exception as e:
+                logger.warning(f"[监控] 获取消息失败: {e}")
+                continue
+
+            # 找到最新的时间戳
+            max_time_in_batch = 0
+            for msg in new_messages:
+                msg_time_int = parse_timestamp(msg.get('create_time') or msg.get('createTime') or 0)
+                if msg_time_int > max_time_in_batch:
+                    max_time_in_batch = msg_time_int
+
+            # 调试：显示轮询状态（每30次）
+            if poll_count % 30 == 0:
+                time_str = format_timestamp(max_time_in_batch) if max_time_in_batch else "无"
+                logger.debug(f"[轮询 {poll_count}] 间隔: {current_interval:.1f}s, 消息数: {len(new_messages)}, 最新: {time_str}")
+
+            # 如果有新消息
+            if max_time_in_batch > last_create_time:
+                old_last_time = last_create_time
+                last_create_time = max_time_in_batch
+
+                consecutive_no_new = 0
+                current_interval = max(POLL_INTERVAL_MIN, current_interval * 0.5)
+
+                # 输出新消息
+                saved_count = self._output_new_messages(
+                    new_messages, group_name, group_id, storage, 
+                    old_last_time, saved_count
+                )
+            else:
+                consecutive_no_new += 1
+                current_interval = min(POLL_INTERVAL_MAX, current_interval * 1.5)
+
+        return last_create_time
+
+    def _fetch_new_messages(self, group_id: str) -> List[Dict]:
+        """获取新消息"""
+        if self.handle and self.handle > 0:
+            from wechat_decrypt_tool.wcdb_realtime import get_messages
+            return get_messages(self.handle, group_id, limit=10)
+        elif self.use_static_mode:
+            return self._get_messages_static(group_id, limit=10)
+        else:
+            return []
+
+    def _output_new_messages(self, messages: List[Dict], group_name: str, 
+                              group_id: str, storage, old_last_time: int,
+                              saved_count: int) -> int:
+        """输出新消息"""
+        time_str = format_timestamp(
+            max(parse_timestamp(m.get('create_time') or m.get('createTime') or 0) for m in messages),
+            '%Y-%m-%d %H:%M:%S'
+        )
+        print(f"\n[新消息] {time_str}", flush=True)
+
+        for msg in reversed(messages):
+            msg_time_int = parse_timestamp(msg.get('create_time') or msg.get('createTime') or 0)
+
+            if msg_time_int > old_last_time:
+                processed = self._process_single_message(msg, group_name, group_id)
+                if not processed:
                     continue
 
-                # 找到最新的时间戳
-                max_time_in_batch = 0
-                for msg in new_messages:
-                    msg_time = msg.get('create_time') or msg.get('createTime') or 0
-                    try:
-                        msg_time_int = int(msg_time) if msg_time else 0
-                    except:
-                        msg_time_int = 0
-                    if msg_time_int > max_time_in_batch:
-                        max_time_in_batch = msg_time_int
-
-                # 调试：显示轮询状态（每30次）
-                if poll_count % 30 == 0:
-                    time_str = datetime.fromtimestamp(max_time_in_batch).strftime('%H:%M:%S') if max_time_in_batch else "无"
-                    logger.debug(f"[轮询 {poll_count}] 间隔: {current_interval:.1f}s, 消息数: {len(new_messages)}, 最新: {time_str}")
-
-                # 如果有新消息
-                if max_time_in_batch > last_create_time:
-                    # 更新时间戳
-                    old_last_time = last_create_time
-                    last_create_time = max_time_in_batch
-
-                    # 重置连续无新消息计数
-                    consecutive_no_new = 0
-
-                    # 自适应：有新消息时，加快轮询
-                    current_interval = max(POLL_INTERVAL_MIN, current_interval * 0.5)
-
-                    # 输出所有新消息（降序排列，最新在上）
-                    time_str = datetime.fromtimestamp(max_time_in_batch).strftime('%Y-%m-%d %H:%M:%S')
-                    print(f"\n[新消息] {time_str}", flush=True)
-
-                    # 反转消息列表，使最新消息在上
-                    for msg in reversed(new_messages):
-                        msg_time = msg.get('create_time') or msg.get('createTime') or 0
-                        try:
-                            msg_time_int = int(msg_time) if msg_time else 0
-                        except:
-                            msg_time_int = 0
-
-                        # 只输出时间戳大于旧记录的消息
-                        if msg_time_int > old_last_time:
-                            # 获取发送者（使用昵称缓存）
-                            sender_wxid = msg.get('sender_username') or msg.get('sender') or '未知'
-                            sender = self._get_display_name(sender_wxid)
-                            content = self.decode_message(msg.get('message_content') or msg.get('content') or '')
-
-                            # 过滤非纯文字消息
-                            if self._is_non_text_message(content):
-                                continue
-
-                            # 清理表情包标记，保留文字
-                            content = self._clean_message_content(content)
-
-                            if len(content.strip()) < 1:
-                                continue
-
-                            time_str = datetime.fromtimestamp(msg_time_int).strftime('%H:%M:%S')
-                            # 显示完整消息内容（使用输出锁防止与看板刷新冲突）
-                            try:
-                                from stock_analysis.dashboard import get_output_lock
-                                with get_output_lock():
-                                    print(f"  [{time_str}] {sender}: {content}", flush=True)
-                                    print()  # 消息之间空一行
-                            except ImportError:
-                                print(f"  [{time_str}] {sender}: {content}", flush=True)
-                                print()
-
-                            # 保存到数据库
-                            try:
-                                storage.save_message(
-                                    sender_nickname=sender,
-                                    message_content=content,
-                                    send_time=datetime.fromtimestamp(msg_time_int),
-                                    group_name=group_name,
-                                    group_id=group_id,
-                                    sender_id=sender_wxid
-                                )
-                                saved_count += 1
-                                # 通知看板刷新（增量匹配+重新渲染）
-                                try:
-                                    from stock_analysis.dashboard import get_dashboard
-                                    _dash = get_dashboard()
-                                    if _dash and hasattr(_dash, 'trigger_refresh'):
-                                        _dash.trigger_refresh()
-                                except Exception:
-                                    pass
-                            except Exception as e:
-                                logger.warning(f"[监控] 保存消息失败: {e}")
-                else:
-                    # 无新消息
-                    consecutive_no_new += 1
-
-                    # 自适应：无新消息时，逐渐放慢轮询
-                    current_interval = min(POLL_INTERVAL_MAX, current_interval * 1.5)
-
-        except KeyboardInterrupt:
-            print('\n\n[监听已停止]')
-            print(f'[统计] 轮询次数: {poll_count}, 最终间隔: {current_interval:.1f}秒')
-            if saved_count > 0:
-                print(f'[已保存 {saved_count} 条消息到数据库]')
-
-                # 触发看板刷新（通知dashboard线程重新渲染）
+                # 显示消息
                 try:
-                    from stock_analysis.dashboard import get_dashboard
-                    dashboard = get_dashboard()
-                    if dashboard and hasattr(dashboard, 'trigger_refresh'):
-                        dashboard.trigger_refresh()
-                except Exception:
-                    pass  # 看板刷新失败不影响主流程
+                    from stock_analysis.dashboard import get_output_lock
+                    with get_output_lock():
+                        print(f"  [{processed['time_str']}] {processed['sender']}: {processed['content']}", flush=True)
+                        print()
+                except ImportError:
+                    print(f"  [{processed['time_str']}] {processed['sender']}: {processed['content']}", flush=True)
+                    print()
 
-    def _get_messages_static(self, group_id: str, limit: int = 30) -> list:
-        """使用静态解密方式获取消息
+                # 保存到数据库
+                try:
+                    storage.save_message(
+                        sender_nickname=processed['sender'],
+                        message_content=processed['content'],
+                        send_time=datetime.fromtimestamp(processed['time_int']),
+                        group_name=group_name,
+                        group_id=group_id,
+                        sender_id=processed['sender_wxid']
+                    )
+                    saved_count += 1
+                    self._trigger_dashboard_refresh()
+                except Exception as e:
+                    logger.warning(f"[监控] 保存消息失败: {e}")
 
-        消息存储在 message/*.db 文件的 Msg_<MD5(group_id)> 表中
-        参考 chat_realtime_reader.py 的实现
-        """
-        import sqlite3
-        import hashlib
+        return saved_count
+
+    def _trigger_dashboard_refresh(self):
+        """触发看板刷新"""
+        try:
+            from stock_analysis.dashboard import get_dashboard
+            dashboard = get_dashboard()
+            if dashboard and hasattr(dashboard, 'trigger_refresh'):
+                dashboard.trigger_refresh()
+        except Exception:
+            pass
+
+    def _get_messages_static(self, group_id: str, limit: int = 30) -> List[Dict]:
+        """使用静态解密方式获取消息"""
         from wechat_decrypt_tool.wechat_decrypt import WeChatDatabaseDecryptor
-        from wechat_decrypt_tool.constants import ZSTD_MAGIC
 
         logger.info(f"[消息查询] 开始查询群聊消息, group_id={group_id}, limit={limit}")
 
@@ -1633,7 +1428,7 @@ class SimpleMonitor:
             logger.warning("[消息查询] 密钥或临时目录未初始化")
             return []
 
-        # 计算消息表名: Msg_<MD5(group_id)>
+        # 计算消息表名
         expected_table = f"Msg_{hashlib.md5(group_id.encode('utf-8')).hexdigest()}"
         logger.debug(f"[消息查询] 期望表名: {expected_table}")
 
@@ -1643,7 +1438,6 @@ class SimpleMonitor:
             logger.warning("[消息查询] session.db 路径未找到")
             return []
 
-        # 获取 db_storage 目录
         db_storage_dir = os.path.dirname(os.path.dirname(session_db_path))
         message_dir = os.path.join(db_storage_dir, "message")
 
@@ -1652,13 +1446,11 @@ class SimpleMonitor:
             return []
 
         # 获取所有消息数据库文件
-        message_dbs = []
-        for f in os.listdir(message_dir):
-            if f.endswith(".db") and not f.endswith("-shm") and not f.endswith("-wal"):
-                if "message" in f.lower():
-                    message_dbs.append(f)
-
-        # 排序：普通消息优先，biz 次之
+        message_dbs = [
+            f for f in os.listdir(message_dir)
+            if f.endswith(".db") and not f.endswith("-shm") and not f.endswith("-wal")
+            and "message" in f.lower()
+        ]
         message_dbs.sort(key=lambda x: (0 if x.startswith("message_") else 1, x))
 
         logger.debug(f"[消息查询] 找到 {len(message_dbs)} 个消息数据库")
@@ -1666,17 +1458,36 @@ class SimpleMonitor:
         decryptor = WeChatDatabaseDecryptor(self.db_key)
         messages = []
 
-        # 遍历数据库查找目标表
         for db_name in message_dbs[:5]:  # 只检查前5个数据库
             db_path = os.path.join(message_dir, db_name)
             temp_db = os.path.join(self.temp_dir, f"temp_{db_name}")
 
             try:
-                # 解密数据库
                 if not decryptor.decrypt_database(db_path, temp_db):
                     continue
 
-                conn = sqlite3.connect(temp_db)
+                messages = self._query_messages_from_db(temp_db, expected_table, limit)
+                if messages:
+                    break
+
+            except Exception as e:
+                logger.warning(f"[消息查询] 处理 {db_name} 失败: {e}")
+            finally:
+                # 清理临时文件
+                try:
+                    if os.path.exists(temp_db):
+                        os.remove(temp_db)
+                except OSError:
+                    pass
+
+        return messages
+
+    def _query_messages_from_db(self, db_path: str, expected_table: str, limit: int) -> List[Dict]:
+        """从解密后的数据库查询消息"""
+        messages = []
+        
+        try:
+            with sqlite3.connect(db_path) as conn:
                 conn.row_factory = sqlite3.Row
                 cursor = conn.cursor()
 
@@ -1689,18 +1500,16 @@ class SimpleMonitor:
 
                 row = cursor.fetchone()
                 if not row:
-                    conn.close()
-                    continue
+                    return messages
 
                 actual_table = row[0]
-                logger.debug(f"[消息查询] 在 {db_name} 中找到表: {actual_table}")
+                logger.debug(f"[消息查询] 找到表: {actual_table}")
 
                 # 检查表字段
                 cursor.execute(f"PRAGMA table_info({actual_table})")
                 columns = [col[1] for col in cursor.fetchall()]
 
-                # 查询消息 - 使用 LEFT JOIN Name2Id 将 real_sender_id 映射到 user_name
-                # 根据字段选择查询语句
+                # 构建查询
                 if 'compress_content' in columns:
                     cursor.execute(f"""
                         SELECT m.local_id, m.create_time, m.message_content, m.compress_content, m.real_sender_id,
@@ -1720,41 +1529,11 @@ class SimpleMonitor:
                         LIMIT ?
                     """, (limit,))
 
-                rows = cursor.fetchall()
-                logger.debug(f"[消息查询] 查询到 {len(rows)} 条消息")
-
-                for row in rows:
+                for row in cursor.fetchall():
                     try:
-                        # 解码消息内容
-                        content = row['message_content']
-                        compress = row['compress_content'] if 'compress_content' in row.keys() else None
-
-                        # 优先使用 compress_content
-                        if compress and isinstance(compress, bytes):
-                            try:
-                                if compress.startswith(ZSTD_MAGIC):
-                                    import zstandard as zstd
-                                    decompressor = zstd.ZstdDecompressor()
-                                    content = decompressor.decompress(compress).decode('utf-8')
-                                else:
-                                    content = compress.decode('utf-8', errors='replace')
-                            except Exception:
-                                pass
-                        elif isinstance(content, bytes):
-                            try:
-                                if content.startswith(ZSTD_MAGIC):
-                                    import zstandard as zstd
-                                    decompressor = zstd.ZstdDecompressor()
-                                    content = decompressor.decompress(content).decode('utf-8')
-                                else:
-                                    content = content.decode('utf-8', errors='replace')
-                            except Exception:
-                                content = str(content)
-
-                        # 获取发送者 - 优先使用 JOIN 得到的 sender_username
+                        content = self._decode_db_message_content(row, columns)
                         sender_username = row['sender_username'] if 'sender_username' in row.keys() else ''
                         if not sender_username:
-                            # 如果 JOIN 失败，使用原始的 real_sender_id
                             sender_username = str(row['real_sender_id']) if row['real_sender_id'] else '未知'
 
                         messages.append({
@@ -1765,163 +1544,102 @@ class SimpleMonitor:
                         })
                     except Exception as e:
                         logger.warning(f"[消息查询] 解析消息失败: {e}")
-                        continue
 
-                conn.close()
-
-                # 找到消息后就退出
-                if messages:
-                    break
-
-            except Exception as e:
-                logger.warning(f"[消息查询] 处理 {db_name} 失败: {e}")
-                continue
-            finally:
-                # 清理临时文件
-                try:
-                    if os.path.exists(temp_db):
-                        os.remove(temp_db)
-                except Exception:
-                    pass
+        except sqlite3.Error as e:
+            logger.warning(f"[消息查询] 数据库查询失败: {e}")
 
         return messages
+
+    def _decode_db_message_content(self, row: sqlite3.Row, columns: List[str]) -> str:
+        """解码数据库中的消息内容"""
+        content = row['message_content']
+        compress = row['compress_content'] if 'compress_content' in columns else None
+
+        # 优先使用 compress_content
+        if compress and isinstance(compress, bytes):
+            try:
+                if compress.startswith(ZSTD_MAGIC):
+                    import zstandard as zstd
+                    decompressor = zstd.ZstdDecompressor()
+                    return decompressor.decompress(compress).decode('utf-8')
+                else:
+                    return compress.decode('utf-8', errors='replace')
+            except Exception:
+                pass
+        elif isinstance(content, bytes):
+            try:
+                if content.startswith(ZSTD_MAGIC):
+                    import zstandard as zstd
+                    decompressor = zstd.ZstdDecompressor()
+                    return decompressor.decompress(content).decode('utf-8')
+                else:
+                    return content.decode('utf-8', errors='replace')
+            except Exception:
+                return str(content)
+
+        return content or ''
 
     def run(self):
         """运行主流程"""
         self.print_header()
 
-        if not self.step1_detect_process():
-            self._wait_exit()
-            return
-
-        if not self.step2_detect_account():
-            self._wait_exit()
-            return
-
-        if not self.step3_get_key():
-            self._wait_exit()
-            return
-
-        if not self.step4_connect_db():
-            self._wait_exit()
-            return
-
-        target_group = self.step5_select_group()
-        if not target_group:
-            print()
-            print("  已取消")
-            return
-
-        self.start_monitoring(target_group)
-
-    def _wait_exit(self):
-        """等待退出"""
-        print()
-        input("  按 Enter 键退出...")
-
-
-def _get_log_file_path() -> Path | None:
-    """获取最新的日志文件路径"""
-    exe_dir = get_exe_dir()
-    log_dir = exe_dir / 'logs'
-    
-    if not log_dir.exists():
-        log_dir = Path.cwd() / 'logs'
-    
-    if not log_dir.exists():
-        return None
-    
-    # 查找最新的日志文件
-    log_files = list(log_dir.glob('app_*.log'))
-    if log_files:
-        return max(log_files, key=lambda f: f.stat().st_mtime)
-    
-    log_files = list(log_dir.glob('*.log'))
-    if log_files:
-        return max(log_files, key=lambda f: f.stat().st_mtime)
-    
-    return None
-
-
-def _open_log_file():
-    """打开日志文件"""
-    log_path = _get_log_file_path()
-    if log_path and log_path.exists():
-        import subprocess
         try:
-            if sys.platform == 'win32':
-                os.startfile(str(log_path))
-            else:
-                subprocess.run(['open', str(log_path)] if sys.platform == 'darwin' else ['xdg-open', str(log_path)])
-            print(f"\n  已打开日志文件: {log_path.name}")
-        except Exception as e:
-            print(f"\n  无法打开日志文件: {e}")
-            print(f"  日志路径: {log_path}")
-    else:
-        print("\n  未找到日志文件")
+            if not self.step1_detect_process():
+                self._wait_exit()
+                return
+
+            if not self.step2_detect_account():
+                self._wait_exit()
+                return
+
+            if not self.step3_get_key():
+                self._wait_exit()
+                return
+
+            if not self.step4_connect_db():
+                self._wait_exit()
+                return
+
+            target_group = self.step5_select_group()
+            if not target_group:
+                print()
+                print("  已取消")
+                return
+
+            self.start_monitoring(target_group)
+
+        finally:
+            # 清理密钥文件
+            self._cleanup_key_file()
+
+    def _cleanup_key_file(self):
+        """清理密钥文件"""
+        try:
+            exe_dir = get_exe_dir()
+            key_store_path = exe_dir / 'output' / 'account_keys.json'
+            if key_store_path.exists():
+                key_store_path.unlink()
+                logger.info("[清理] 已清除密钥文件")
+        except OSError as e:
+            logger.warning(f"[清理] 清除密钥文件失败: {e}")
 
 
-def _cleanup_key_file():
-    """清理密钥文件 - 程序退出时调用"""
-    try:
-        exe_dir = get_exe_dir()
-        key_store_path = exe_dir / 'output' / 'account_keys.json'
-        if key_store_path.exists():
-            key_store_path.unlink()
-            logger.info("[清理] 已清除密钥文件")
-    except Exception as e:
-        logger.warning(f"[清理] 清除密钥文件失败: {e}")
-
+# ==================== 主函数 ====================
 
 def main():
     """主函数 - 生产版本（带全局异常处理）"""
     try:
         monitor = SimpleMonitor()
         monitor.run()
-        # 正常退出时清除密钥
-        _cleanup_key_file()
     except KeyboardInterrupt:
         print('\n\n[用户中断]')
-        _cleanup_key_file()
         sys.exit(0)
     except Exception as e:
-        # 异常退出时也清除密钥
-        _cleanup_key_file()
-        
         # 记录异常到日志
         logger.exception(f"程序发生未捕获异常: {e}")
         
-        # 显示友好的错误信息
-        print()
-        print("=" * 60)
-        print("  程序遇到错误，抱歉!")
-        print("=" * 60)
-        print()
-        print(f"  错误类型: {type(e).__name__}")
-        print(f"  错误信息: {str(e)[:100]}")
-        print()
-        print("  可能的解决方案:")
-        print("  1. 确保微信已登录")
-        print("  2. 以管理员权限运行程序")
-        print("  3. 检查杀毒软件是否拦截")
-        print()
-        
-        # 尝试打开日志文件
-        log_path = _get_log_file_path()
-        if log_path:
-            print(f"  日志文件: {log_path}")
-            
-            # 询问是否打开日志
-            try:
-                choice = input("\n  是否打开日志文件查看详情? (y/n): ").strip().lower()
-                if choice == 'y' or choice == 'yes':
-                    _open_log_file()
-            except (EOFError, KeyboardInterrupt):
-                pass
-        
-        print()
-        input("  按 Enter 键退出...")
-        sys.exit(1)
+        # 显示错误并退出
+        display_error_and_exit(e)
 
 
 if __name__ == '__main__':
