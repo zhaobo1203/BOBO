@@ -30,6 +30,7 @@ if not getattr(sys, 'frozen', False):
 
 from wechat_decrypt_tool.exe_logging import setup_exe_logging, get_exe_logger, get_exe_dir
 from wechat_decrypt_tool.constants import POLL_INTERVAL_DEFAULT, POLL_INTERVAL_MIN, POLL_INTERVAL_MAX, ZSTD_MAGIC
+from wechat_decrypt_tool.database_matcher import enumerate_session_dbs, find_matching_database
 from common_utils import display_error_and_exit, parse_timestamp, format_timestamp, truncate_text
 
 # 初始化日志
@@ -438,22 +439,30 @@ class SimpleMonitor:
                 if db_key and len(str(db_key)) == 64:
                     self.db_key = str(db_key).lower()
 
-                    # 验证密钥是否匹配 session.db
-                    print(f"  验证密钥与数据库匹配性...", flush=True)
-                    logger.info("[步骤3] 开始验证密钥与数据库匹配性")
-
-                    if self._verify_key_and_find_matching_db():
-                        self.print_step("密钥获取", "done", "Hook注入成功")
-                        logger.info("[步骤3] Hook注入成功获取密钥（已验证匹配）")
+                    # 主动匹配数据库（替换旧逻辑：不再依赖初始目录选择）
+                    print(f"  [..] 正在匹配密钥与数据库（遍历所有数据目录）...", flush=True)
+                    logger.info("[步骤3] 开始主动匹配密钥与数据库")
+                    
+                    from wechat_decrypt_tool.wechat_detection import auto_detect_wechat_data_dirs
+                    detected_dirs = auto_detect_wechat_data_dirs()
+                    candidates = enumerate_session_dbs(detected_dirs)
+                    match_result = find_matching_database(self.db_key, candidates)
+                    
+                    if match_result.matched_path:
+                        # 更新为匹配到的正确数据目录
+                        old_data_path = self.data_path
+                        self.data_path = match_result.matched_data_path
+                        self.print_step("密钥获取", "done", f"Hook注入成功，匹配数据库: {match_result.matched_path} (第{match_result.verified_at_retry}次重试)")
+                        logger.info(f"[步骤3] Hook注入成功，匹配数据库成功: 旧目录={old_data_path}, 新目录={self.data_path}, 数据库={match_result.matched_path}")
                         self._save_key()
                         return True
                     else:
-                        # 密钥不匹配任何 session.db，但仍保存密钥，让步骤4尝试
-                        logger.warning("[步骤3] 密钥与所有session.db不匹配，将继续尝试")
-                        print(f"  [!] 密钥与当前数据库不匹配，将在步骤4中重试")
-                        self.print_step("密钥获取", "done", "Hook注入成功（未验证）")
-                        self._save_key()
-                        return True
+                        # 所有尝试都失败
+                        logger.warning("[步骤3] 密钥与所有session.db都不匹配，尝试过的路径:")
+                        for tried in match_result.tried_paths:
+                            logger.warning(f"  - {tried['path']}: {tried['mode']}")
+                        print(f"  [!] 密钥与所有数据目录中的session.db都不匹配，请检查密钥是否正确")
+                        print(f"      已尝试 {len(match_result.tried_paths)} 个候选数据库")
                 else:
                     logger.warning(f"[步骤3] Hook返回密钥格式无效: len={len(str(db_key)) if db_key else 0}")
                     print(f"  [!] 密钥格式无效，长度: {len(str(db_key)) if db_key else 0}")
@@ -742,35 +751,19 @@ class SimpleMonitor:
             self.print_step("数据库连接", "fail", "无密钥")
             return False
 
+        # 步骤3已经完成匹配，data_path已经是正确的了
         print(f"  等待微信初始化完成...")
         time.sleep(3)
 
-        # 查找 session.db
+        # 查找 session.db（此时 data_path 已经匹配正确）
         session_db_path = self._find_session_db()
         if not session_db_path:
             self.print_step("数据库连接", "fail", "session.db不存在")
             return False
 
-        # 验证密钥是否匹配当前 session.db
-        if not self._verify_key_matches_db(session_db_path, self.db_key):
-            logger.warning("[步骤4] 密钥与当前session.db不匹配，重新搜索匹配的数据库...")
-            print(f"  [!] 密钥与session.db不匹配，重新搜索...")
-
-            if self._verify_key_and_find_matching_db():
-                # 找到了匹配的数据库，重新获取 session.db 路径
-                session_db_path = self._find_session_db()
-                if not session_db_path:
-                    self.print_step("数据库连接", "fail", "session.db不存在")
-                    return False
-                logger.info(f"[步骤4] 密钥验证通过，使用匹配的数据库: {session_db_path}")
-            else:
-                # 所有 session.db 都不匹配，仍然尝试解密
-                logger.warning("[步骤4] 所有session.db均不匹配密钥，仍将尝试解密")
-                print(f"  [!] 未找到密钥匹配的数据库，仍将尝试解密...")
-
         # 首先尝试静态解密
         print(f"  使用静态解密方式...")
-        logger.info(f"[步骤4] 尝试静态解密方式连接数据库")
+        logger.info(f"[步骤4] 尝试静态解密方式连接数据库（data_path已在步骤3匹配完成）")
 
         static_success = False
         try:

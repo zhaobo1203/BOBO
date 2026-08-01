@@ -1,0 +1,36 @@
+微信群消息监听与股票分析系统 v3.0.0 
+ 
+【功能说明】 
+1. 微信群消息实时监控（模块1） 
+2. A股数据库管理，支持手动更新（模块2） 
+3. 股票提及自动匹配与统计分析（模块3） 
+ 
+【使用方法】 
+1. 确保已安装微信并登录 
+2. 首次运行请先安装 vc_redist.x64.exe 
+3. 双击运行 微信群小工具_v3.0.0.exe 
+4. 按照提示完成：进程检测→密钥获取→选择群聊 
+5. 监控启动后，股票分析服务自动运行 
+ 
+【API服务】 
+- 地址: http://localhost:8000 
+- 健康检查: GET /api/health 
+- 手动刷新: POST /api/refresh 
+- 增量刷新: POST /api/incremental-refresh 
+- 更新A股数据库: POST /api/update-stock-db 
+- 日统计: GET /api/stats/daily 
+- 周统计: GET /api/stats/weekly 
+- 月统计: GET /api/stats/monthly 
+ 
+【数据目录】 
+- A股数据库: data/a_stock_db/a_stock.db 
+- 消息数据库: data/messages.db 
+- 匹配结果: data/stock_mentions.db 
+- 日志文件: logs/ 
+- 密钥存储: output/account_keys.json 
+ 
+【注意事项】 
+- 首次运行需要获取数据库密钥（可能需要重启微信） 
+- A股数据库已内嵌，首次运行自动释放 
+- 可通过API手动更新A股数据库 
+- 如遇DLL缺失问题，请安装 vc_redist.x64.exe 
