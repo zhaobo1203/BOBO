@@ -5,7 +5,6 @@ A股数据库操作模块
 """
 
 import sqlite3
-import os
 from pathlib import Path
 from typing import Optional
 from dataclasses import dataclass
@@ -128,6 +127,32 @@ class AStockDatabase:
                 (f"%{name}%",)
             )
             return cursor.fetchall()
+    
+    def search_by_name(self, name: str) -> list[dict]:
+        """根据股票名称搜索股票（返回字典列表，兼容测试接口）
+        
+        Args:
+            name: 股票名称（支持模糊匹配）
+            
+        Returns:
+            匹配的股票字典列表 [{'code': ..., 'name': ...}]
+        """
+        results = self.get_stock_by_name(name)
+        return [{'code': code, 'name': name} for code, name in results]
+    
+    def search_by_code(self, code: str) -> Optional[dict]:
+        """根据股票代码搜索股票（返回字典，兼容测试接口）
+        
+        Args:
+            code: 股票代码（精确匹配）
+            
+        Returns:
+            匹配的股票字典 {'code': ..., 'name': ...} 或 None
+        """
+        result = self.get_stock_by_code(code)
+        if result:
+            return {'code': result[0], 'name': result[1]}
+        return None
     
     def update_stocks(self, stocks: list[tuple[str, str]], source: str = "unknown") -> DatabaseStats:
         """更新股票数据（增量更新）
@@ -256,13 +281,7 @@ class AStockDatabase:
         Returns:
             校准统计信息（added_count为校准新增的数量）
         """
-        # 获取现有股票代码
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.cursor()
-            cursor.execute("SELECT code FROM stocks")
-            existing_codes = {row[0] for row in cursor.fetchall()}
-        
-        # 找出遗漏的股票
+        existing_codes = {code for code, _ in self.get_all_stocks()}
         new_codes = {code for code, _ in stocks}
         added_codes = new_codes - existing_codes
         
@@ -276,35 +295,23 @@ class AStockDatabase:
                 removed_count=0
             )
         
-        # 插入遗漏的股票
-        added_stocks = [(code, name) for code, name in stocks if code in added_codes]
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.cursor()
-            for code, name in added_stocks:
-                cursor.execute('''
-                    INSERT INTO stocks (code, name, updated_at) 
-                    VALUES (?, ?, CURRENT_TIMESTAMP)
-                    ON CONFLICT(code) DO UPDATE SET 
-                        name = excluded.name,
-                        updated_at = CURRENT_TIMESTAMP
-                ''', (code, name))
+        # 记录校准新增的股票
+        for code, name in stocks:
+            if code in added_codes:
                 logger.info(f"校准新增股票: {code} {name}")
-            
-            # 记录校准日志
-            cursor.execute('''
-                INSERT INTO update_log (total_count, added_count, removed_count, source)
-                VALUES (?, ?, 0, ?)
-            ''', (self.get_stock_count() + len(added_codes), len(added_codes), source))
-            
-            conn.commit()
+        
+        # 复用 update_stocks 进行插入（传一个较大的列表让它认为不足4000只从而跳过删除）
+        # 更稳妥的方式：只传新增股票列表，确保不会触发删除逻辑
+        added_stocks = [(code, name) for code, name in stocks if code in added_codes]
+        # added_stocks 数量一定小于4000，update_stocks 会跳过删除
+        result = self.update_stocks(added_stocks, source=source)
         
         total = self.get_stock_count()
         logger.info(f"数据校准完成：新增 {len(added_codes)} 只遗漏股票，当前总数 {total}")
         
-        stats = self.get_stats()
         return DatabaseStats(
             total_count=total,
-            last_update_time=stats.last_update_time,
+            last_update_time=result.last_update_time,
             added_count=len(added_codes),
             removed_count=0
         )

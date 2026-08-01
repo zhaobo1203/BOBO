@@ -6,6 +6,7 @@
 
 import sys
 import os
+import logging
 import threading
 import multiprocessing
 from pathlib import Path
@@ -21,7 +22,6 @@ if not getattr(sys, 'frozen', False):
 from common_utils import display_error_and_exit
 
 
-# 获取EXE所在目录（运行时数据根目录）
 def get_app_dir() -> Path:
     """获取应用根目录
 
@@ -30,8 +30,7 @@ def get_app_dir() -> Path:
     """
     if getattr(sys, 'frozen', False):
         return Path(sys.executable).parent
-    else:
-        return Path(__file__).resolve().parents[1]
+    return Path(__file__).resolve().parents[1]
 
 
 APP_DIR = get_app_dir()
@@ -43,10 +42,8 @@ def get_blacklist_path() -> Path:
     打包后：从EXE内部临时解压目录读取
     开发时：从源码目录读取
     """
-    if getattr(sys, 'frozen', False):
-        return Path(sys._MEIPASS) / "stock_analysis" / "config" / "blacklist.json"
-    else:
-        return Path(__file__).parent / "stock_analysis" / "config" / "blacklist.json"
+    base = Path(sys._MEIPASS) if getattr(sys, 'frozen', False) else Path(__file__).parent
+    return base / "stock_analysis" / "config" / "blacklist.json"
 
 
 def redirect_settings_paths():
@@ -99,11 +96,11 @@ def _verify_a_stock_db(db_path: Path) -> bool:
         True 如果数据库表结构完整，False 否则
     """
     import sqlite3
-    
+
     if not db_path.exists():
         print(f"  [警告] A股数据库文件不存在: {db_path}")
         return False
-    
+
     try:
         with sqlite3.connect(str(db_path)) as conn:
             cursor = conn.cursor()
@@ -112,24 +109,26 @@ def _verify_a_stock_db(db_path: Path) -> bool:
 
             required_tables = {'stocks', 'update_log'}
             if not required_tables.issubset(tables):
-                missing = required_tables - tables
-                print(f"  [警告] A股数据库缺少表: {missing}")
+                print(f"  [警告] A股数据库缺少表: {required_tables - tables}")
                 return False
 
             # 验证stocks表是否有数据
             cursor.execute("SELECT COUNT(*) FROM stocks")
-            count = cursor.fetchone()[0]
-            if count == 0:
+            if cursor.fetchone()[0] == 0:
                 print(f"  [警告] A股数据库stocks表为空（0条记录）")
                 return False
 
             return True
-    except sqlite3.Error as e:
-        print(f"  [警告] A股数据库验证失败（SQLite错误）: {e}")
-        return False
     except Exception as e:
         print(f"  [警告] A股数据库验证失败: {e}")
         return False
+
+
+def _get_a_stock_db_source_path() -> Path:
+    """获取A股数据库的源路径（打包时从MEIPASS读取，开发时从项目目录读取）"""
+    if getattr(sys, 'frozen', False):
+        return Path(sys._MEIPASS) / "data" / "a_stock_db" / "a_stock.db"
+    return APP_DIR / "data" / "a_stock_db" / "a_stock.db"
 
 
 def ensure_a_stock_db():
@@ -145,17 +144,17 @@ def ensure_a_stock_db():
     if target_path.exists():
         if _verify_a_stock_db(target_path):
             return  # 数据库完整，无需操作
-        else:
-            # 数据库存在但表结构不完整，需要重新释放
-            print(f"  [修复] A股数据库表结构不完整，尝试重新释放...")
-            try:
-                target_path.unlink()
-            except OSError as e:
-                print(f"  [警告] 无法删除损坏的数据库: {e}")
-                return  # 无法删除，放弃操作
+        # 数据库存在但表结构不完整，需要重新释放
+        print(f"  [修复] A股数据库表结构不完整，尝试重新释放...")
+        try:
+            target_path.unlink()
+        except OSError as e:
+            print(f"  [警告] 无法删除损坏的数据库: {e}")
+            return  # 无法删除，放弃操作
+
+    source_path = _get_a_stock_db_source_path()
 
     if getattr(sys, 'frozen', False):
-        source_path = Path(sys._MEIPASS) / "data" / "a_stock_db" / "a_stock.db"
         if source_path.exists():
             target_path.parent.mkdir(parents=True, exist_ok=True)
             import shutil
@@ -172,7 +171,6 @@ def ensure_a_stock_db():
             print(f"  [警告] EXE内部未找到A股数据库资源，将通过API初始化")
     else:
         # 开发模式：检查项目根目录的data
-        source_path = APP_DIR / "data" / "a_stock_db" / "a_stock.db"
         if source_path.exists():
             if _verify_a_stock_db(source_path):
                 print(f"  A股数据库已就绪: {source_path}")
@@ -184,10 +182,17 @@ def ensure_a_stock_db():
 
 def ensure_directories():
     """确保运行时数据目录存在"""
-    (APP_DIR / "data" / "a_stock_db").mkdir(parents=True, exist_ok=True)
-    (APP_DIR / "data").mkdir(parents=True, exist_ok=True)
-    (APP_DIR / "logs").mkdir(parents=True, exist_ok=True)
-    (APP_DIR / "output").mkdir(parents=True, exist_ok=True)
+    required_dirs = [
+        APP_DIR / "data" / "a_stock_db",
+        APP_DIR / "data",
+        APP_DIR / "logs",
+        APP_DIR / "output",
+    ]
+    for dir_path in required_dirs:
+        try:
+            dir_path.mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            print(f"  [警告] 创建目录失败 {dir_path}: {e}")
 
 
 def _is_port_in_use(port: int) -> bool:
@@ -217,7 +222,6 @@ def start_fastapi_server():
     支持端口冲突自动切换：当默认端口被占用时，自动寻找可用端口。
     """
     import uvicorn
-    import logging
 
     # 重定向路径配置
     redirect_settings_paths()
@@ -330,10 +334,9 @@ def main():
         sys.exit(0)
     except Exception as e:
         # 记录异常到日志
-        import logging
         logger = logging.getLogger(__name__)
         logger.exception(f"程序发生未捕获异常: {e}")
-        
+
         # 使用公共模块显示错误
         display_error_and_exit(e)
 

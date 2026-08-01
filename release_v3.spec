@@ -36,6 +36,8 @@ wasm_patterns = [
 ]
 
 # A股数据库（首次释放用）
+# 注意：按"绝对干净"原则，不打包本地数据库文件
+# 首次运行时由代码自动创建表结构，数据通过API手动更新
 a_stock_db_pattern = 'data/a_stock_db/a_stock.db'
 
 # 黑名单配置（模块3必需）
@@ -62,12 +64,15 @@ collect_files(native_dll_patterns, 'wechat_decrypt_tool/native')
 # 收集 WASM/JS 文件
 collect_files(wasm_patterns, 'wechat_decrypt_tool/native/weflow_wasm')
 
-# 收集 A股数据库
-a_stock_db_path = os.path.join(PROJECT_ROOT, a_stock_db_pattern)
-if os.path.exists(a_stock_db_path):
-    filtered_datas.append((a_stock_db_path, 'data/a_stock_db'))
-else:
-    print(f"[警告] A股数据库不存在: {a_stock_db_path}")
+# 收集 A股数据库（已禁用 - 按"绝对干净"原则，不打包本地数据
+# 首次运行时由 AStockDatabase._init_database() 自动创建表结构，
+# 用户通过 POST /api/update-stock-db 接口手动更新A股数据）
+# a_stock_db_path = os.path.join(PROJECT_ROOT, a_stock_db_pattern)
+# if os.path.exists(a_stock_db_path):
+#     filtered_datas.append((a_stock_db_path, 'data/a_stock_db'))
+# else:
+#     print(f"[警告] A股数据库不存在: {a_stock_db_path}")
+print("[信息] 按干净打包原则，A股数据库不打包，首次运行自动创建表结构")
 
 # 收集黑名单配置
 blacklist_path = os.path.join(PROJECT_ROOT, blacklist_pattern)
@@ -266,7 +271,7 @@ exe = EXE(
     console=True,
     disable_windowed_traceback=False,
     argv_emulation=False,
-    target_arch=None,
+    target_arch='x64',
     codesign_identity=None,
     entitlements_file=None,
     icon=None,

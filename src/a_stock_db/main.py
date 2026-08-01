@@ -7,6 +7,7 @@ A股数据库主程序
 """
 
 import sys
+import logging
 import argparse
 from pathlib import Path
 
@@ -16,6 +17,8 @@ sys.path.insert(0, str(project_root / "src"))
 
 from a_stock_db.data_sources import DataSourceManager, DataSourceResult
 from a_stock_db.database import AStockDatabase, DatabaseStats
+
+logger = logging.getLogger(__name__)
 
 
 def print_header():

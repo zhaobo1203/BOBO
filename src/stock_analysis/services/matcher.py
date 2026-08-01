@@ -62,6 +62,8 @@ class Matcher:
         "已经也已正在将将要会能不能得可以可"
         "还还有又却但而且或者与及和跟比较更"
         "最就才只是到从被把给让向对于按"
+        # 时间词（股票名称后紧跟时间词时视为有效边界）
+        "今天明天昨今后上下去年年前月日周秒分钟小时"
         # 财经新闻常见动词（股票名称后紧跟这些动词构成主谓结构，应视为有效匹配）
         "披发布宣告称说表显提涨跌停收开"
         "完该此其每各另再因如若则虽"
@@ -132,15 +134,15 @@ class Matcher:
             return []
 
         records = []
-
-        # 2. 名称精确匹配（同一条消息同一只股票只算1次提及）
-        name_matches = self._match_by_name(cleaned_content)
         seen_codes = set()
-        for stock, match_type in name_matches:
+
+        # 2+3. 名称匹配 + 代码匹配（名称优先，同一只股票只算1次提及）
+        all_matches = self._match_by_name(cleaned_content) + self._match_by_code(cleaned_content)
+        for stock, match_type in all_matches:
             if stock.code in seen_codes:
                 continue
             seen_codes.add(stock.code)
-            record = MentionRecord(
+            records.append(MentionRecord(
                 message_id=message_id,
                 stock_code=stock.code,
                 stock_name=stock.name,
@@ -149,26 +151,7 @@ class Matcher:
                 message_content=content,  # 保留原始内容
                 send_time=send_time,
                 group_name=group_name,
-            )
-            records.append(record)
-
-        # 3. 代码精确匹配（同一条消息同一只股票不重复计数）
-        code_matches = self._match_by_code(cleaned_content)
-        for stock, match_type in code_matches:
-            if stock.code in seen_codes:
-                continue
-            seen_codes.add(stock.code)
-            record = MentionRecord(
-                message_id=message_id,
-                stock_code=stock.code,
-                stock_name=stock.name,
-                match_type=match_type,
-                sender=sender,
-                message_content=content,
-                send_time=send_time,
-                group_name=group_name,
-            )
-            records.append(record)
+            ))
 
         if records:
             logger.debug(
@@ -384,25 +367,12 @@ class Matcher:
         """
         检查代码匹配的边界条件
 
-        代码前后必须是：消息首尾、标点、空格、换行
-        代码前后不能是字母或数字（数字已由正则保证）
+        代码前后不能是字母（数字边界已由正则 (?<!\\d)/(?!\\d) 保证）
         """
-        # 检查前一个字符
-        if start > 0:
-            prev_char = text[start - 1]
-            if prev_char.isalpha():
-                return False
-            if prev_char not in self.BOUNDARY_CHARS and prev_char.isdigit():
-                return False
-
-        # 检查后一个字符
-        if end < len(text):
-            next_char = text[end]
-            if next_char.isalpha():
-                return False
-            if next_char not in self.BOUNDARY_CHARS and next_char.isdigit():
-                return False
-
+        if start > 0 and text[start - 1].isalpha():
+            return False
+        if end < len(text) and text[end].isalpha():
+            return False
         return True
 
     def match_messages_batch(self, messages: List[tuple]) -> List[MentionRecord]:

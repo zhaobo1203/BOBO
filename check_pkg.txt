@@ -1,0 +1,5 @@
+Traceback (most recent call last):
+  File "<string>", line 1, in <module>
+    from PyInstaller.archive.readers import CArchiveReader; reader=CArchiveReader(r'dist\微信群小工具_v3.0.0.exe'); toc=reader.toc; entries=[(name,code) for name,(offset,size,code) in toc.items()]; datas=[n for n,c in entries if c=='z']; print('DATA_FILE_COUNT:', len(datas)); [print('DATA:', d) for d in sorted(datas)]; bins=[n for n,c in entries if c=='x']; print('EXT_COUNT:', len(bins)); [print('EXT:', b) for b in sorted(bins)[:20]]
+                                                                                                                                                                  ^^^^^^^^^^^^^^^^^^
+ValueError: too many values to unpack (expected 3, got 5)

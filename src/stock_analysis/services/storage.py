@@ -27,58 +27,45 @@ class StorageService:
     def _init_db(self):
         """初始化数据库，创建表结构"""
         conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
+        try:
+            cursor = conn.cursor()
 
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS stock_mentions (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                message_id INTEGER NOT NULL,
-                stock_code TEXT NOT NULL,
-                stock_name TEXT NOT NULL,
-                match_type TEXT NOT NULL,
-                sender TEXT NOT NULL,
-                message_content TEXT NOT NULL,
-                send_time TEXT NOT NULL,
-                group_name TEXT NOT NULL,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS stock_mentions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    message_id INTEGER NOT NULL,
+                    stock_code TEXT NOT NULL,
+                    stock_name TEXT NOT NULL,
+                    match_type TEXT NOT NULL,
+                    sender TEXT NOT NULL,
+                    message_content TEXT NOT NULL,
+                    send_time TEXT NOT NULL,
+                    group_name TEXT NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
 
-        cursor.execute("""
-            CREATE INDEX IF NOT EXISTS idx_stock_code
-            ON stock_mentions(stock_code)
-        """)
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_stock_code ON stock_mentions(stock_code)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_send_time ON stock_mentions(send_time)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_message_id ON stock_mentions(message_id)")
+            # 全局去重索引：消息内容+股票代码组合
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_content_code ON stock_mentions(message_content, stock_code)")
 
-        cursor.execute("""
-            CREATE INDEX IF NOT EXISTS idx_send_time
-            ON stock_mentions(send_time)
-        """)
+            # 记录处理进度的表
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS process_log (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    process_type TEXT NOT NULL,
+                    last_message_id INTEGER DEFAULT 0,
+                    total_processed INTEGER DEFAULT 0,
+                    total_matched INTEGER DEFAULT 0,
+                    process_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
 
-        cursor.execute("""
-            CREATE INDEX IF NOT EXISTS idx_message_id
-            ON stock_mentions(message_id)
-        """)
-
-        # 全局去重索引：消息内容+股票代码组合
-        cursor.execute("""
-            CREATE INDEX IF NOT EXISTS idx_content_code
-            ON stock_mentions(message_content, stock_code)
-        """)
-
-        # 记录处理进度的表
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS process_log (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                process_type TEXT NOT NULL,
-                last_message_id INTEGER DEFAULT 0,
-                total_processed INTEGER DEFAULT 0,
-                total_matched INTEGER DEFAULT 0,
-                process_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
-
-        conn.commit()
-        conn.close()
+            conn.commit()
+        finally:
+            conn.close()
         logger.info(f"存储数据库初始化完成: {self.db_path}")
 
     def _ensure_messages_db(self):
@@ -231,6 +218,43 @@ class StorageService:
         self._last_processed_id = last_id
         return last_id
 
+    _MSG_SELECT_SQL = "SELECT id, sender_nickname, message_content, send_time, group_name FROM group_messages"
+
+    def _query_messages(self, where_clause: str = "", params: tuple = (), log_msg: str = "") -> List[tuple]:
+        """从messages.db查询消息，带一次重试机制
+
+        Args:
+            where_clause: WHERE子句（不含WHERE关键字）
+            params: 查询参数
+            log_msg: 日志消息模板（用{count}占位）
+
+        Returns:
+            消息元组列表
+        """
+        sql = self._MSG_SELECT_SQL
+        if where_clause:
+            sql += f" WHERE {where_clause}"
+        sql += " ORDER BY id"
+
+        for attempt in range(2):
+            try:
+                conn = sqlite3.connect(self.messages_db_path, timeout=30)
+                conn.execute("PRAGMA journal_mode=WAL")
+                cursor = conn.cursor()
+                cursor.execute(sql, params)
+                rows = cursor.fetchall()
+                conn.close()
+                if log_msg:
+                    logger.info(log_msg.format(count=len(rows)))
+                return rows
+            except sqlite3.OperationalError as e:
+                if attempt == 0:
+                    logger.warning(f"读取messages.db失败(锁定?): {e}, 重试...")
+                    time.sleep(1)
+                else:
+                    raise
+        return []
+
     def get_new_messages(self) -> List[tuple]:
         """
         从messages.db获取未处理的新消息
@@ -239,36 +263,11 @@ class StorageService:
             消息元组列表 (id, sender_nickname, message_content, send_time, group_name)
         """
         last_id = self.get_last_processed_id()
-
-        try:
-            conn = sqlite3.connect(self.messages_db_path, timeout=30)
-            conn.execute("PRAGMA journal_mode=WAL")
-            cursor = conn.cursor()
-            cursor.execute("""
-                SELECT id, sender_nickname, message_content, send_time, group_name
-                FROM group_messages
-                WHERE id > ?
-                ORDER BY id
-            """, (last_id,))
-            rows = cursor.fetchall()
-            conn.close()
-        except sqlite3.OperationalError as e:
-            logger.warning(f"读取messages.db失败(锁定?): {e}, 重试...")
-            time.sleep(1)
-            conn = sqlite3.connect(self.messages_db_path, timeout=30)
-            conn.execute("PRAGMA journal_mode=WAL")
-            cursor = conn.cursor()
-            cursor.execute("""
-                SELECT id, sender_nickname, message_content, send_time, group_name
-                FROM group_messages
-                WHERE id > ?
-                ORDER BY id
-            """, (last_id,))
-            rows = cursor.fetchall()
-            conn.close()
-
-        logger.info(f"发现{len(rows)}条新消息(已处理至ID={last_id})")
-        return rows
+        return self._query_messages(
+            where_clause="id > ?",
+            params=(last_id,),
+            log_msg=f"发现{{count}}条新消息(已处理至ID={last_id})"
+        )
 
     def get_all_messages(self) -> List[tuple]:
         """
@@ -277,33 +276,7 @@ class StorageService:
         Returns:
             消息元组列表 (id, sender_nickname, message_content, send_time, group_name)
         """
-        try:
-            conn = sqlite3.connect(self.messages_db_path, timeout=30)
-            conn.execute("PRAGMA journal_mode=WAL")
-            cursor = conn.cursor()
-            cursor.execute("""
-                SELECT id, sender_nickname, message_content, send_time, group_name
-                FROM group_messages
-                ORDER BY id
-            """)
-            rows = cursor.fetchall()
-            conn.close()
-        except sqlite3.OperationalError as e:
-            logger.warning(f"读取messages.db失败(锁定?): {e}, 重试...")
-            time.sleep(1)
-            conn = sqlite3.connect(self.messages_db_path, timeout=30)
-            conn.execute("PRAGMA journal_mode=WAL")
-            cursor = conn.cursor()
-            cursor.execute("""
-                SELECT id, sender_nickname, message_content, send_time, group_name
-                FROM group_messages
-                ORDER BY id
-            """)
-            rows = cursor.fetchall()
-            conn.close()
-
-        logger.info(f"从消息数据库加载{len(rows)}条消息")
-        return rows
+        return self._query_messages(log_msg="从消息数据库加载{count}条消息")
 
     def clear_all(self):
         """清空所有匹配结果（用于全量重新匹配）"""

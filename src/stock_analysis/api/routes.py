@@ -26,18 +26,21 @@ def init_services(storage_service: StorageService,
     logger.info("API路由服务初始化完成")
 
 
+def _get_all_mentions():
+    """获取所有提及记录的便捷方法"""
+    return _storage_service.get_all_mentions()
+
+
 @router.get("/stats/daily")
 def get_daily_stats():
     """获取当天股票提及统计"""
-    mentions = _storage_service.get_all_mentions()
-    return _statistics_service.get_daily_stats(mentions)
+    return _statistics_service.get_daily_stats(_get_all_mentions())
 
 
 @router.get("/stats/weekly")
 def get_weekly_stats():
     """获取本周股票提及统计"""
-    mentions = _storage_service.get_all_mentions()
-    return _statistics_service.get_weekly_stats(mentions)
+    return _statistics_service.get_weekly_stats(_get_all_mentions())
 
 
 @router.get("/stats/monthly")
@@ -46,8 +49,7 @@ def get_monthly_stats(
     month: Optional[int] = Query(None, description="月份，默认当月"),
 ):
     """获取指定月份股票提及统计"""
-    mentions = _storage_service.get_all_mentions()
-    return _statistics_service.get_monthly_stats(mentions, year=year, month=month)
+    return _statistics_service.get_monthly_stats(_get_all_mentions(), year=year, month=month)
 
 
 @router.get("/stock/{code}/details")
@@ -119,7 +121,7 @@ def update_stock_db():
 @router.get("/health")
 def health_check():
     """健康检查"""
-    mentions = _storage_service.get_all_mentions()
+    mentions = _get_all_mentions()
     return {
         "status": "ok",
         "total_mentions": len(mentions),
