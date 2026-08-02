@@ -88,9 +88,19 @@ class Matcher:
         self.code_index = code_index
         # 按名称长度降序排列，优先匹配更长的名称
         self.sorted_names = sorted(name_index.keys(), key=len, reverse=True)
+        # 构建正则表达式，一次性匹配所有股票名称
+        # 长度降序保证长名称优先匹配，re会按顺序匹配
+        if self.sorted_names:
+            escaped_names = [re.escape(name) for name in self.sorted_names]
+            pattern = '|'.join(escaped_names)
+            self.name_pattern = re.compile(pattern)
+        else:
+            self.name_pattern = None
         # 加载黑名单
         self.blacklist = self._load_blacklist()
         logger.info(f"匹配引擎初始化完成，名称索引{len(name_index)}条，代码索引{len(code_index)}条，黑名单{sum(len(v) for v in self.blacklist.values())}条")
+        if self.name_pattern:
+            logger.info(f"已构建名称匹配正则，总长度: {self.name_pattern.pattern.__len__()} 字符")
 
     def _load_blacklist(self) -> Dict[str, List[str]]:
         """
@@ -196,6 +206,7 @@ class Matcher:
     def _match_by_name(self, text: str) -> List[Tuple[Stock, str]]:
         """
         按股票名称精确匹配（严格边界判断）
+        使用正则一次性找出所有匹配，比循环text.find快一个数量级
 
         Returns:
             (Stock, match_type) 列表
@@ -203,35 +214,33 @@ class Matcher:
         matches = []
         matched_positions = set()  # 记录已匹配的位置，避免重叠
 
-        for name in self.sorted_names:
-            stock = self.name_index[name]
-            start = 0
-            while True:
-                pos = text.find(name, start)
-                if pos == -1:
-                    break
+        if not self.name_pattern:
+            return matches
 
-                end = pos + len(name)
+        # 使用正则一次性找出所有匹配
+        for match in self.name_pattern.finditer(text):
+            name = match.group(0)
+            pos = match.start()
+            end = match.end()
+            stock = self.name_index.get(name)
+            if not stock:
+                continue
 
-                # 检查是否与已匹配的位置重叠
-                if any(pos <= mp < end for mp in matched_positions):
-                    start = end
+            # 检查是否与已匹配的位置重叠
+            if any(pos <= mp < end for mp in matched_positions):
+                continue
+
+            # 严格边界判断
+            if self._check_boundary(text, pos, end):
+                # 黑名单过滤：检查匹配到的名称在上下文中是否命中黑名单
+                if self._check_blacklist(text, pos, end, name):
+                    logger.debug(f"黑名单过滤: '{name}'在消息中命中黑名单，跳过")
                     continue
 
-                # 严格边界判断
-                if self._check_boundary(text, pos, end):
-                    # 黑名单过滤：检查匹配到的名称在上下文中是否命中黑名单
-                    if self._check_blacklist(text, pos, end, name):
-                        logger.debug(f"黑名单过滤: '{name}'在消息中命中黑名单，跳过")
-                        start = end
-                        continue
-
-                    matches.append((stock, "name"))
-                    # 记录匹配位置
-                    for i in range(pos, end):
-                        matched_positions.add(i)
-
-                start = end
+                matches.append((stock, "name"))
+                # 记录匹配位置
+                for i in range(pos, end):
+                    matched_positions.add(i)
 
         return matches
 

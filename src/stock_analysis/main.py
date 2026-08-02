@@ -4,6 +4,7 @@
 """
 import logging
 import asyncio
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -25,6 +26,40 @@ stock_loader = StockLoader()
 storage_service = StorageService()
 statistics_service = StatisticsService()
 matcher = None  # 需要stock_loader加载后初始化
+
+
+def wait_for_a_stock_db_ready(max_wait_seconds: int = 60, interval_seconds: int = 2) -> bool:
+    """等待A股数据库就绪（stocks表存在且可查询）
+    
+    Args:
+        max_wait_seconds: 最大等待时间（秒）
+        interval_seconds: 重试间隔（秒）
+    
+    Returns:
+        True表示就绪，False表示超时
+    """
+    logger = logging.getLogger(__name__)
+    logger.info(f"等待A股数据库(stocks表)就绪，最大等待{max_wait_seconds}秒...")
+    
+    elapsed = 0
+    while elapsed < max_wait_seconds:
+        try:
+            from a_stock_db.database import AStockDatabase
+            db = AStockDatabase()
+            # 尝试查询stocks表，如果表不存在会抛异常
+            count = db.get_stock_count()
+            logger.info(f"A股数据库就绪，当前股票数量: {count}")
+            return True
+        except Exception as e:
+            if "no such table" in str(e) or "no such function" in str(e):
+                logger.info(f"A股数据库尚未就绪 ({e}), {interval_seconds}秒后重试...")
+            else:
+                logger.warning(f"检查A股数据库状态时出错: {e}, {interval_seconds}秒后重试...")
+        time.sleep(interval_seconds)
+        elapsed += interval_seconds
+    
+    logger.warning(f"等待A股数据库就绪超时({max_wait_seconds}秒)，将继续启动，全量匹配可能失败")
+    return False
 
 
 def setup_logging():
@@ -231,7 +266,10 @@ async def lifespan(app: FastAPI):
     logger.info("模块3 数据分析服务启动中...")
     logger.info("=" * 60)
 
-    # 启动时尝试全量匹配（可能因模块1尚未准备好而失败，降级处理）
+    # 等待A股数据库就绪（最多等待60秒）
+    db_ready = wait_for_a_stock_db_ready()
+    
+    # 尝试全量匹配（如果数据库未就绪，可能失败但已做降级处理）
     try:
         result = run_full_match()
         if result.get("error"):

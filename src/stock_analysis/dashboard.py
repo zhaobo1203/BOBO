@@ -91,6 +91,13 @@ def _build_dashboard_lines(refresh_msg: str = "", month_label: str = "") -> list
     query_year = _selected_year if _selected_year else now.year
     query_month = _selected_month if _selected_month else now.month
 
+    # 先做健康检查，判断是否还在全量匹配中
+    health = fetch_api("/api/health")
+    total_mentions = 0
+    if health and health.get('status') == 'ok':
+        total_mentions = health.get('total_mentions', 0)
+    data_loading = (total_mentions == 0)
+
     daily_data = fetch_api("/api/stats/daily")
     weekly_data = fetch_api("/api/stats/weekly")
     monthly_data = fetch_api(f"/api/stats/monthly?year={query_year}&month={query_month}")
@@ -111,7 +118,10 @@ def _build_dashboard_lines(refresh_msg: str = "", month_label: str = "") -> list
         for line in format_stock_table(daily_data['stocks'], max_rows=5):
             lines.append(f"|{line:<63}|")
     else:
-        lines.append("|  暂无数据" + " " * 53 + "|")
+        if data_loading:
+            lines.append("|  股票监控正在分析信息数据..." + " " * 29 + "|")
+        else:
+            lines.append("|  暂无数据" + " " * 53 + "|")
     lines.append("+" + "-" * 62 + "+")
 
     if weekly_data:
@@ -125,7 +135,10 @@ def _build_dashboard_lines(refresh_msg: str = "", month_label: str = "") -> list
         for line in format_stock_table(weekly_data['stocks'], max_rows=5):
             lines.append(f"|{line:<63}|")
     else:
-        lines.append("|  暂无数据" + " " * 53 + "|")
+        if data_loading:
+            lines.append("|  股票监控正在分析信息数据..." + " " * 29 + "|")
+        else:
+            lines.append("|  暂无数据" + " " * 53 + "|")
     lines.append("+" + "-" * 62 + "+")
 
     if monthly_data:
@@ -148,7 +161,10 @@ def _build_dashboard_lines(refresh_msg: str = "", month_label: str = "") -> list
         for line in format_stock_table(monthly_data['stocks'], max_rows=5):
             lines.append(f"|{line:<63}|")
     else:
-        lines.append("|  暂无数据" + " " * 53 + "|")
+        if data_loading:
+            lines.append("|  股票监控正在分析信息数据..." + " " * 29 + "|")
+        else:
+            lines.append("|  暂无数据" + " " * 53 + "|")
     lines.append("+" + "-" * 62 + "+")
 
     lines.append("|  [R]刷新看板 [M]上月 [N]下月 [Q]退出  120秒自动刷新")

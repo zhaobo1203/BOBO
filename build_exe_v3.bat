@@ -125,68 +125,8 @@ if %EXE_SIZE_MB% LSS 50 (
 
 echo.
 
-REM ============== 步骤6: 准备发布文件 ==============
-echo [6/7] 准备发布文件...
-
-REM 创建release目录
-if not exist "release" mkdir release
-
-REM 复制EXE文件
-copy /y "%EXE_FILE%" "release\" >nul 2>&1
-echo       已复制 EXE 到 release\
-
-REM 复制VC++运行时（如果存在）
-if exist "vc_redist.x64.exe" (
-    copy /y "vc_redist.x64.exe" "release\" >nul 2>&1
-    echo       已复制 vc_redist.x64.exe
-) else (
-    echo [警告] 未找到 vc_redist.x64.exe
-)
-
-REM 生成使用说明.txt
-echo 微信群消息监听与股票分析系统 v3.0.0 > release\使用说明.txt
-echo. >> release\使用说明.txt
-echo 【功能说明】 >> release\使用说明.txt
-echo 1. 微信群消息实时监控（模块1） >> release\使用说明.txt
-echo 2. A股数据库管理，支持手动更新（模块2） >> release\使用说明.txt
-echo 3. 股票提及自动匹配与统计分析（模块3） >> release\使用说明.txt
-echo. >> release\使用说明.txt
-echo 【使用方法】 >> release\使用说明.txt
-echo 1. 确保已安装微信并登录 >> release\使用说明.txt
-echo 2. 首次运行请先安装 vc_redist.x64.exe >> release\使用说明.txt
-echo 3. 双击运行 微信群小工具_v3.0.0.exe >> release\使用说明.txt
-echo 4. 按照提示完成：进程检测→密钥获取→选择群聊 >> release\使用说明.txt
-echo 5. 监控启动后，股票分析服务自动运行 >> release\使用说明.txt
-echo. >> release\使用说明.txt
-echo 【API服务】 >> release\使用说明.txt
-echo - 地址: http://localhost:8000 >> release\使用说明.txt
-echo - 健康检查: GET /api/health >> release\使用说明.txt
-echo - 手动刷新: POST /api/refresh >> release\使用说明.txt
-echo - 增量刷新: POST /api/incremental-refresh >> release\使用说明.txt
-echo - 更新A股数据库: POST /api/update-stock-db >> release\使用说明.txt
-echo - 日统计: GET /api/stats/daily >> release\使用说明.txt
-echo - 周统计: GET /api/stats/weekly >> release\使用说明.txt
-echo - 月统计: GET /api/stats/monthly >> release\使用说明.txt
-echo. >> release\使用说明.txt
-echo 【数据目录】 >> release\使用说明.txt
-echo - A股数据库: data/a_stock_db/a_stock.db >> release\使用说明.txt
-echo - 消息数据库: data/messages.db >> release\使用说明.txt
-echo - 匹配结果: data/stock_mentions.db >> release\使用说明.txt
-echo - 日志文件: logs/ >> release\使用说明.txt
-echo - 密钥存储: output/account_keys.json >> release\使用说明.txt
-echo. >> release\使用说明.txt
-echo 【注意事项】 >> release\使用说明.txt
-echo - 首次运行需要获取数据库密钥（可能需要重启微信） >> release\使用说明.txt
-echo - A股数据库已内嵌，首次运行自动释放 >> release\使用说明.txt
-echo - 可通过API手动更新A股数据库 >> release\使用说明.txt
-echo - 如遇DLL缺失问题，请安装 vc_redist.x64.exe >> release\使用说明.txt
-
-echo       已生成 使用说明.txt
-
-echo.
-
-REM ============== 步骤7: 完成 ==============
-echo [7/7] 打包完成!
+REM ============== 步骤6: 完成 ==============
+echo [6/6] 打包完成!
 echo.
 
 echo ========================================
@@ -195,12 +135,7 @@ echo ========================================
 echo.
 echo  输出文件: %EXE_FILE%
 echo  文件大小: %EXE_SIZE_MB% MB
-echo  发布目录: release\
-echo.
-echo  发布文件清单:
-echo    - 微信群小工具_v3.0.0.exe
-echo    - vc_redist.x64.exe
-echo    - 使用说明.txt
+echo  输出目录: dist\
 echo.
 echo ========================================
 echo.
