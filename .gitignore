@@ -57,6 +57,25 @@ pnpm-lock.yaml
 release/*.exe
 release/logs/
 
+# Release package (too large for GitHub)
+release_pkg/
+
 # Log files
 logs/
 *.log
+*.txt
+debug_output.txt
+debug2.txt
+test_output.txt
+
+# Database files (too large)
+data/*.db
+data/a_stock_db/
+
+# Test reports
+*.md
+!DESIGN_REPORT.md
+!WORKFLOW_DIAGRAM.md
+!TECHNICAL_REPORT_TN01_TN06.md
+!PROJECT_FLOW_DIAGRAMS.md
+!TECHNICAL_SPECIFICATION_REPORT.md

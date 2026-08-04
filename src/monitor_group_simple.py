@@ -57,33 +57,34 @@ from wechat_decrypt_tool.chat_helpers import _iter_message_db_paths, _resolve_ms
 POLL_INTERVAL = 2  # 轮询间隔（秒）
 
 
+def _decompress_zstd(data: bytes) -> str:
+    """尝试zstd解压数据，如果失败返回原始内容解码"""
+    zstd_magic = b"\x28\xb5\x2f\xfd"
+    if data.startswith(zstd_magic):
+        try:
+            decompressor = zstd.ZstdDecompressor()
+            decompressed = decompressor.decompress(data)
+            return decompressed.decode('utf-8', errors='replace')
+        except (zstd.ZstdError, OSError, UnicodeDecodeError):
+            pass
+    return data.decode('utf-8', errors='replace')
+
+
 def decode_message_content(message_value: Any) -> str:
     """解码消息内容（处理 zstd 压缩）"""
-    zstd_magic = b"\x28\xb5\x2f\xfd"
-
     if message_value is None:
         return ""
 
     # 处理 bytes 类型
     if isinstance(message_value, bytes):
-        if message_value.startswith(zstd_magic):
-            try:
-                decompressor = zstd.ZstdDecompressor()
-                decompressed = decompressor.decompress(message_value)
-                return decompressed.decode('utf-8', errors='replace')
-            except (zstd.ZstdError, OSError, UnicodeDecodeError):
-                pass
-        return message_value.decode('utf-8', errors='replace')
+        return _decompress_zstd(message_value)
 
     # 处理 hex 字符串
     text = str(message_value).strip()
     if len(text) >= 16 and len(text) % 2 == 0:
         try:
             raw = bytes.fromhex(text)
-            if raw.startswith(zstd_magic):
-                decompressor = zstd.ZstdDecompressor()
-                decompressed = decompressor.decompress(raw)
-                return decompressed.decode('utf-8', errors='replace')
+            return _decompress_zstd(raw)
         except (ValueError, zstd.ZstdError, OSError):
             pass
 
@@ -277,80 +278,73 @@ def get_group_messages_from_db(
                 if not decryptor.decrypt_database(str(db_path), temp_db):
                     continue
 
-                conn = sqlite3.connect(temp_db)
-                conn.row_factory = sqlite3.Row
+                # 使用 with 确保连接总是被关闭，防止资源泄漏
+                with sqlite3.connect(temp_db) as conn:
+                    conn.row_factory = sqlite3.Row
 
-                # 查找群对应的消息表
-                table_name = _resolve_msg_table_name(conn, group_id)
-                if not table_name:
-                    # 尝试其他表名格式
-                    cursor = conn.cursor()
-                    cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
-                    for row in cursor.fetchall():
-                        table = row[0]
-                        if 'msg' in table.lower() or 'chat' in table.lower():
-                            # 检查表中是否有该群的消息
-                            try:
-                                test_sql = f'SELECT COUNT(*) FROM "{table}" WHERE talker = ? LIMIT 1'
-                                count = conn.execute(test_sql, (group_id,)).fetchone()
-                                if count and count[0] > 0:
-                                    table_name = table
-                                    break
-                            except sqlite3.Error:
-                                continue
+                    # 查找群对应的消息表
+                    table_name = _resolve_msg_table_name(conn, group_id)
+                    if not table_name:
+                        # 尝试其他表名格式
+                        cursor = conn.cursor()
+                        cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
+                        for row in cursor.fetchall():
+                            table = row[0]
+                            if 'msg' in table.lower() or 'chat' in table.lower():
+                                # 检查表中是否有该群的消息
+                                try:
+                                    test_sql = f'SELECT COUNT(*) FROM "{table}" WHERE talker = ? LIMIT 1'
+                                    count = conn.execute(test_sql, (group_id,)).fetchone()
+                                    if count and count[0] > 0:
+                                        table_name = table
+                                        break
+                                except sqlite3.Error:
+                                    continue
 
-                if not table_name:
-                    conn.close()
-                    continue
-
-                # 查询消息
-                quoted_table = f'"{table_name}"'
-                sql = f'''
-                    SELECT
-                        local_id,
-                        create_time,
-                        talker,
-                        sender_username,
-                        message_content,
-                        local_type,
-                        status
-                    FROM {quoted_table}
-                    WHERE talker = ?
-                    ORDER BY create_time DESC
-                    LIMIT ?
-                '''
-
-                cursor = conn.cursor()
-                cursor.execute(sql, (group_id, limit))
-
-                for row in cursor.fetchall():
-                    local_type = int(row['local_type'] or 0)
-                    content = decode_message_content(row['message_content'])
-
-                    # 只保留文本消息
-                    if not is_text_message(content, local_type):
+                    if not table_name:
                         continue
 
-                    sender_username = row['sender_username'] or ''
-                    sender_display = get_sender_display_name(sender_username, contacts)
+                    # 查询消息 - 必须查询该分片所有消息，不限制
+                    quoted_table = f'"{table_name}"'
+                    sql = f'''
+                        SELECT
+                            local_id,
+                            create_time,
+                            talker,
+                            sender_username,
+                            message_content,
+                            local_type,
+                            status
+                        FROM {quoted_table}
+                        WHERE talker = ?
+                        ORDER BY create_time DESC
+                    '''
 
-                    messages.append({
-                        'create_time': row['create_time'],
-                        'sender_username': sender_username,
-                        'sender_display': sender_display,
-                        'content': content,
-                        'local_type': local_type,
-                    })
+                    cursor = conn.cursor()
+                    cursor.execute(sql, (group_id,))
 
-                conn.close()
+                    for row in cursor.fetchall():
+                        local_type = int(row['local_type'] or 0)
+                        content = decode_message_content(row['message_content'])
+
+                        # 只保留文本消息
+                        if not is_text_message(content, local_type):
+                            continue
+
+                        sender_username = row['sender_username'] or ''
+                        sender_display = get_sender_display_name(sender_username, contacts)
+
+                        messages.append({
+                            'create_time': row['create_time'],
+                            'sender_username': sender_username,
+                            'sender_display': sender_display,
+                            'content': content,
+                            'local_type': local_type,
+                        })
 
             except sqlite3.Error as e:
                 print(f"[警告] 处理数据库 {db_path.name} 时出错: {e}")
                 continue
-
-            # 如果已经获取到足够消息，跳出循环
-            if len(messages) >= limit:
-                break
 
     finally:
         try:
@@ -358,9 +352,12 @@ def get_group_messages_from_db(
         except OSError:
             pass
 
-    # 按时间正序排列
+    # 按时间正序排列，最新消息在最后
     messages.sort(key=lambda x: int(x.get('create_time') or 0))
-    return messages[:limit]
+    # 截取最新的 limit 条消息
+    if len(messages) > limit:
+        return messages[-limit:]
+    return messages
 
 
 def get_group_messages_via_wcdb(

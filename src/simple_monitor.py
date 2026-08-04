@@ -1359,11 +1359,12 @@ class SimpleMonitor:
     def _display_and_save_history(self, messages: List[Dict], group_name: str,
                                     group_id: str, storage) -> int:
         """显示并保存历史消息"""
-        # 显示历史消息（最新的5条）
+         # 显示历史消息（最新的5条）
         print(f"  最近 {min(5, len(messages))} 条历史消息:")
         print()
 
-        for msg in messages[:5]:
+        # messages 按 create_time 升序排序，最新消息在末尾，取最后5条
+        for msg in messages[-min(5, len(messages)):]:
             processed = self._process_single_message(msg, group_name, group_id)
             if processed:
                 print(f"    [{processed['time_str']}] {processed['sender']}: {processed['content']}")
@@ -1656,7 +1657,7 @@ class SimpleMonitor:
         return mapping
 
     def _get_messages_static(self, group_id: str, limit: int = 30) -> List[Dict]:
-        """使用静态解密方式获取消息"""
+        """使用静态解密方式获取消息 - 新流程：遍历所有分片 → 全部收集 → 全局排序 → 截取最新"""
         from wechat_decrypt_tool.wechat_decrypt import WeChatDatabaseDecryptor
 
         logger.info(f"[消息查询] 开始查询群聊消息, group_id={group_id}, limit={limit}")
@@ -1690,12 +1691,13 @@ class SimpleMonitor:
         ]
         message_dbs.sort(key=lambda x: (0 if x.startswith("message_") else 1, x))
 
-        logger.debug(f"[消息查询] 找到 {len(message_dbs)} 个消息数据库")
+        logger.info(f"[消息查询] 找到 {len(message_dbs)} 个消息数据库，开始遍历所有分片")
 
         decryptor = WeChatDatabaseDecryptor(self.db_key)
-        messages = []
+        all_messages = []
 
-        for db_name in message_dbs[:5]:  # 只检查前5个数据库
+        # 必须遍历所有分片，全部收集消息，不提前终止
+        for db_name in message_dbs:
             db_path = os.path.join(message_dir, db_name)
             temp_db = os.path.join(self.temp_dir, f"temp_{db_name}")
 
@@ -1703,9 +1705,10 @@ class SimpleMonitor:
                 if not decryptor.decrypt_database(db_path, temp_db):
                     continue
 
-                messages = self._query_messages_from_db(temp_db, expected_table, limit)
+                messages = self._query_messages_from_db(temp_db, expected_table)
                 if messages:
-                    break
+                    all_messages.extend(messages)
+                # 继续遍历下一个分片，不提前终止
 
             except Exception as e:
                 logger.warning(f"[消息查询] 处理 {db_name} 失败: {e}")
@@ -1717,10 +1720,18 @@ class SimpleMonitor:
                 except OSError:
                     pass
 
-        return messages
+        # 全局排序：按时间从小到大，最新消息在最后
+        all_messages.sort(key=lambda x: int(x.get('create_time') or 0))
+        # 截取最新的 limit 条消息
+        if len(all_messages) > limit:
+            result = all_messages[-limit:]
+            logger.info(f"[消息查询] 遍历完成，共收集 {len(all_messages)} 条，截取最新 {len(result)} 条")
+            return result
+        logger.info(f"[消息查询] 遍历完成，共收集 {len(all_messages)} 条消息")
+        return all_messages
 
-    def _query_messages_from_db(self, db_path: str, expected_table: str, limit: int) -> List[Dict]:
-        """从解密后的数据库查询消息"""
+    def _query_messages_from_db(self, db_path: str, expected_table: str) -> List[Dict]:
+        """从解密后的数据库查询消息 - 查询该分片所有消息，不做 limit 限制"""
         messages = []
         
         try:
@@ -1754,8 +1765,7 @@ class SimpleMonitor:
                     FROM {actual_table} m
                     LEFT JOIN Name2Id n ON m.real_sender_id = n.rowid
                     ORDER BY m.create_time DESC
-                    LIMIT ?
-                """, (limit,))
+                """)
 
                 for row in cursor.fetchall():
                     try:
